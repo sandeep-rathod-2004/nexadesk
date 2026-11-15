@@ -90,6 +90,8 @@ class PreparedChat:
     settings: Settings
     message: str
     conversation: Conversation | None
+    chat_type: str
+    document_ids: set[UUID]
     workspace_id: UUID
     history: list[dict[str, str]]
     rag_context: str | None
@@ -141,12 +143,23 @@ async def _prepare_chat(
 
     if workspace_id is None:
         raise HTTPException(status_code=403, detail="Workspace membership required.")
+    chat_type = conversation.chat_type if conversation is not None else "normal"
+    document_ids = (
+        {
+            association.document_id
+            for association in conversation.document_associations
+        }
+        if conversation is not None and chat_type == "knowledge"
+        else set()
+    )
     if request_id is not None:
         log_stage("conversation_history_loaded", history_started_at, request_id)
     return PreparedChat(
         settings=settings,
         message=message,
         conversation=conversation,
+        chat_type=chat_type,
+        document_ids=document_ids,
         workspace_id=workspace_id,
         history=history,
         rag_context=None,
@@ -159,6 +172,14 @@ async def _prepare_chat(
 async def _prepare_rag(
     prepared: PreparedChat, db: DbSession, request_id: UUID | None = None
 ) -> None:
+    if prepared.chat_type == "normal":
+        return
+    if not prepared.document_ids:
+        prepared.fixed_reply = (
+            "No documents are attached to this Knowledge Chat. "
+            "Choose one or more ready documents to ask a knowledge-based question."
+        )
+        return
     retrieval_started_at = time.perf_counter()
     ready_documents = db.scalar(
         select(func.count())
@@ -166,10 +187,17 @@ async def _prepare_rag(
         .where(
             KnowledgeDocument.workspace_id == prepared.workspace_id,
             KnowledgeDocument.status == "ready",
+            KnowledgeDocument.id.in_(prepared.document_ids),
         )
     ) or 0
     if request_id is not None:
         log_stage("rag_document_check_completed", retrieval_started_at, request_id)
+    if not ready_documents:
+        prepared.fixed_reply = (
+            "The selected documents are not currently ready. "
+            "Please choose ready documents and try again."
+        )
+        return
     if ready_documents:
         try:
             task_type = (
@@ -203,6 +231,7 @@ async def _prepare_rag(
                 prepared.settings.knowledge_min_similarity,
                 prepared.settings.embedding_provider,
                 prepared.settings.configured_embedding_model,
+                document_ids=prepared.document_ids,
             )
         except EmbeddingCompatibilityError as exc:
             raise HTTPException(
@@ -244,6 +273,7 @@ def _persist_response(
         prepared.workspace_id,
         reply,
         [source.model_dump(mode="json") for source in prepared.sources],
+        allowed_document_ids=prepared.document_ids,
     )
     prepared.sources = [
         SourceReference.model_validate(source) for source in source_data
@@ -660,11 +690,20 @@ async def stream_chat(
                         {"code": "invalid_replay", "message": "The saved response is unavailable."},
                     )
                     return
+                replay_document_ids = (
+                    {
+                        association.document_id
+                        for association in replay_conversation.document_associations
+                    }
+                    if replay_conversation.chat_type == "knowledge"
+                    else set()
+                )
                 replay_reply, replay_sources = validate_citations(
                     db,
                     replay_conversation.workspace_id,
                     generation.reply,
                     generation.sources,
+                    allowed_document_ids=replay_document_ids,
                 )
                 yield _sse_event(
                     "complete",

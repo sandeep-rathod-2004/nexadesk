@@ -5,6 +5,8 @@ from uuid import UUID, uuid4
 from sqlalchemy import (
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
+    Index,
     JSON,
     String,
     Text,
@@ -23,15 +25,34 @@ if TYPE_CHECKING:
 
 class Conversation(Base):
     __tablename__ = "conversations"
+    __table_args__ = (
+        Index(
+            "uq_conversation_id_workspace",
+            "id",
+            "workspace_id",
+            unique=True,
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     workspace_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True
+        Uuid,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     created_by_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+        Uuid,
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
     )
-    title: Mapped[str] = mapped_column(String(200), nullable=False, default="New conversation")
+    title: Mapped[str] = mapped_column(
+        String(200), nullable=False, default="New conversation"
+    )
+    chat_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="normal", server_default="normal"
+    )
     last_message_sequence: Mapped[int] = mapped_column(
         default=0, server_default="0", nullable=False
     )
@@ -57,6 +78,40 @@ class Conversation(Base):
         cascade="all, delete-orphan",
         order_by="Message.sequence",
     )
+    document_associations: Mapped[list["ConversationDocument"]] = relationship(
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+
+class ConversationDocument(Base):
+    __tablename__ = "conversation_documents"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["conversation_id", "workspace_id"],
+            ["conversations.id", "conversations.workspace_id"],
+            ondelete="CASCADE",
+            name="fk_conversation_document_conversation_workspace",
+        ),
+        ForeignKeyConstraint(
+            ["document_id", "workspace_id"],
+            ["knowledge_documents.id", "knowledge_documents.workspace_id"],
+            ondelete="CASCADE",
+            name="fk_conversation_document_document_workspace",
+        ),
+    )
+
+    conversation_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    document_id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    workspace_id: Mapped[UUID] = mapped_column(Uuid, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    conversation: Mapped["Conversation"] = relationship(
+        back_populates="document_associations"
+    )
 
 
 class Message(Base):
@@ -69,7 +124,10 @@ class Message(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
     conversation_id: Mapped[UUID] = mapped_column(
-        Uuid, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True
+        Uuid,
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     sequence: Mapped[int] = mapped_column(nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)

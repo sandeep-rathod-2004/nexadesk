@@ -13,6 +13,7 @@ const api = vi.hoisted(() => ({
   listConversations: vi.fn(),
   getMessages: vi.fn(),
   createConversation: vi.fn(),
+  updateConversationDocuments: vi.fn(),
   renameConversation: vi.fn(),
   deleteConversation: vi.fn(),
   cancelChat: vi.fn(),
@@ -48,6 +49,8 @@ const firstConversation = {
   id: "conversation-1",
   workspace_id: "workspace-1",
   title: "Planning notes",
+  chat_type: "normal" as const,
+  document_ids: [],
   created_at: "2026-01-01T00:00:00Z",
   updated_at: "2026-01-01T00:00:00Z"
 };
@@ -81,6 +84,7 @@ describe("conversation management UI", () => {
     api.getMessages.mockResolvedValue([]);
     api.getModel.mockResolvedValue({ provider: "Ollama", model: "phi3:mini" });
     api.createConversation.mockResolvedValue(firstConversation);
+    api.updateConversationDocuments.mockResolvedValue(firstConversation);
     api.renameConversation.mockImplementation(async (_token: string, _id: string, title: string) => ({
       ...firstConversation,
       title
@@ -363,6 +367,99 @@ describe("conversation management UI", () => {
       "conversation-1"
     ));
     expect(await screen.findByText("No conversations yet. Start a new one.")).toBeTruthy();
+  });
+
+  it("creates a Knowledge Chat with only the selected ready documents", async () => {
+    api.listKnowledgeDocuments.mockResolvedValue([
+      {
+        id: "document-1",
+        workspace_id: "workspace-1",
+        filename: "Travel policy.pdf",
+        media_type: "application/pdf",
+        size_bytes: 123,
+        status: "ready",
+        error_message: null,
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z"
+      },
+      {
+        id: "document-2",
+        workspace_id: "workspace-1",
+        filename: "Employee guide.pdf",
+        media_type: "application/pdf",
+        size_bytes: 456,
+        status: "ready",
+        error_message: null,
+        created_at: "2026-01-02T00:00:00Z",
+        updated_at: "2026-01-02T00:00:00Z"
+      }
+    ]);
+    api.createConversation.mockResolvedValue({
+      ...firstConversation,
+      chat_type: "knowledge",
+      document_ids: ["document-1"]
+    });
+    const user = await signIn();
+    await user.click(screen.getByRole("button", { name: "New Knowledge Chat" }));
+    await user.click(screen.getByLabelText("Travel policy.pdf"));
+    await user.click(screen.getByRole("button", { name: "Create Knowledge Chat" }));
+
+    await waitFor(() => expect(api.createConversation).toHaveBeenCalledWith(
+      "in-memory-token",
+      "workspace-1",
+      "New conversation",
+      "knowledge",
+      ["document-1"]
+    ));
+    expect(await screen.findByRole("heading", { name: "How can I help you today?" })).toBeTruthy();
+  });
+
+  it("updates sources for an existing Knowledge Chat", async () => {
+    const knowledgeConversation = {
+      ...firstConversation,
+      chat_type: "knowledge" as const,
+      document_ids: ["document-1"]
+    };
+    api.listConversations.mockResolvedValue([knowledgeConversation]);
+    api.listKnowledgeDocuments.mockResolvedValue([
+      {
+        id: "document-1",
+        workspace_id: "workspace-1",
+        filename: "Travel policy.pdf",
+        media_type: "application/pdf",
+        size_bytes: 123,
+        status: "ready",
+        error_message: null,
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-01T00:00:00Z"
+      },
+      {
+        id: "document-2",
+        workspace_id: "workspace-1",
+        filename: "Employee guide.pdf",
+        media_type: "application/pdf",
+        size_bytes: 456,
+        status: "ready",
+        error_message: null,
+        created_at: "2026-01-02T00:00:00Z",
+        updated_at: "2026-01-02T00:00:00Z"
+      }
+    ]);
+    api.updateConversationDocuments.mockResolvedValue({
+      ...knowledgeConversation,
+      document_ids: ["document-1", "document-2"]
+    });
+    const user = await signIn();
+    await user.click(await screen.findByRole("button", { name: "Planning notes" }));
+    await user.click(await screen.findByRole("button", { name: "Sources" }));
+    await user.click(screen.getByLabelText("Employee guide.pdf"));
+    await user.click(screen.getByRole("button", { name: "Save sources" }));
+
+    await waitFor(() => expect(api.updateConversationDocuments).toHaveBeenCalledWith(
+      "in-memory-token",
+      "conversation-1",
+      ["document-1", "document-2"]
+    ));
   });
 
   it("loads previous messages and prevents duplicate chat submission", async () => {

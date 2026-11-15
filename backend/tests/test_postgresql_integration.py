@@ -118,7 +118,7 @@ def _auth(token: str) -> dict[str, str]:
 def test_postgresql_migration_history_and_schema(postgres_session_factory):
     with postgres_session_factory() as db:
         version = db.scalar(text("SELECT version_num FROM alembic_version"))
-        assert version == "0010_refresh_tokens"
+        assert version == "0011_chat_types"
     engine = postgres_session_factory.kw["bind"]
     inspector = inspect(engine)
     document_columns = {

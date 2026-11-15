@@ -15,6 +15,8 @@ export type Conversation = {
   id: string;
   workspace_id: string;
   title: string;
+  chat_type: "normal" | "knowledge";
+  document_ids: string[];
   created_at: string;
   updated_at: string;
 };
@@ -220,9 +222,11 @@ export function getModel(token: string): Promise<ModelInfo> {
 
 export function listConversations(
   token: string,
-  workspaceId: string
+  workspaceId: string,
+  chatType?: "normal" | "knowledge"
 ): Promise<Conversation[]> {
-  return request(`/conversations?workspace_id=${encodeURIComponent(workspaceId)}`, {
+  const typeQuery = chatType ? `&chat_type=${chatType}` : "";
+  return request(`/conversations?workspace_id=${encodeURIComponent(workspaceId)}${typeQuery}`, {
     token
   });
 }
@@ -230,12 +234,34 @@ export function listConversations(
 export function createConversation(
   token: string,
   workspaceId: string,
-  title = "New conversation"
+  title = "New conversation",
+  chatType: "normal" | "knowledge" = "normal",
+  documentIds: string[] = []
 ): Promise<Conversation> {
+  const body = chatType === "normal" && documentIds.length === 0
+    ? { workspace_id: workspaceId, title }
+    : {
+        workspace_id: workspaceId,
+        title,
+        chat_type: chatType,
+        document_ids: documentIds
+      };
   return request("/conversations", {
     method: "POST",
     token,
-    body: { workspace_id: workspaceId, title }
+    body
+  });
+}
+
+export function updateConversationDocuments(
+  token: string,
+  conversationId: string,
+  documentIds: string[]
+): Promise<Conversation> {
+  return request(`/conversations/${encodeURIComponent(conversationId)}/documents`, {
+    method: "PUT",
+    token,
+    body: { document_ids: documentIds }
   });
 }
 

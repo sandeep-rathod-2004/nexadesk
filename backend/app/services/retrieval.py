@@ -42,7 +42,10 @@ def retrieve_chunks(
     min_similarity: float,
     embedding_provider: str | None = None,
     embedding_model: str | None = None,
+    document_ids: set[UUID] | None = None,
 ) -> list[RetrievedChunk]:
+    if document_ids is not None and not document_ids:
+        return []
     rows = db.execute(
         select(KnowledgeChunk, KnowledgeDocument)
         .join(
@@ -54,6 +57,11 @@ def retrieve_chunks(
             KnowledgeChunk.workspace_id == workspace_id,
             KnowledgeDocument.workspace_id == workspace_id,
             KnowledgeDocument.status == "ready",
+            *(
+                [KnowledgeDocument.id.in_(document_ids)]
+                if document_ids is not None
+                else []
+            ),
         )
     )
     matches: list[RetrievedChunk] = []
@@ -229,6 +237,7 @@ def validate_citations(
     workspace_id: UUID,
     reply: str,
     sources: list[dict[str, object]],
+    allowed_document_ids: set[UUID] | None = None,
 ) -> tuple[str, list[dict[str, object]]]:
     def parse_chunk_id(source: dict[str, object]) -> UUID | None:
         raw_id = source.get("chunk_id") or source.get("id")
@@ -245,7 +254,7 @@ def validate_citations(
         if (chunk_id := parse_chunk_id(source)) is not None
     }
     valid_chunks: dict[UUID, tuple[KnowledgeChunk, KnowledgeDocument]] = {}
-    if chunk_ids:
+    if chunk_ids and (allowed_document_ids is None or allowed_document_ids):
         rows = db.execute(
             select(KnowledgeChunk, KnowledgeDocument)
             .join(
@@ -258,6 +267,11 @@ def validate_citations(
                 KnowledgeChunk.workspace_id == workspace_id,
                 KnowledgeDocument.workspace_id == workspace_id,
                 KnowledgeDocument.status == "ready",
+                *(
+                    [KnowledgeDocument.id.in_(allowed_document_ids)]
+                    if allowed_document_ids is not None
+                    else []
+                ),
             )
         )
         valid_chunks = {

@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -19,6 +20,8 @@ class SourceReference(BaseModel):
 class ConversationCreate(BaseModel):
     workspace_id: UUID
     title: str = Field(default="New conversation", min_length=1, max_length=200)
+    chat_type: Literal["normal", "knowledge"] = "normal"
+    document_ids: list[UUID] = Field(default_factory=list)
 
     @field_validator("title")
     @classmethod
@@ -41,10 +44,16 @@ class ConversationRename(BaseModel):
         return value
 
 
+class ConversationDocumentsUpdate(BaseModel):
+    document_ids: list[UUID]
+
+
 class ConversationResponse(BaseModel):
     id: UUID
     workspace_id: UUID
     title: str
+    chat_type: Literal["normal", "knowledge"]
+    document_ids: list[UUID] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

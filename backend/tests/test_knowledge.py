@@ -578,12 +578,14 @@ def test_rag_chat_returns_and_persists_verified_sources(
         async def generate(self, message, history=None, rag_context=None):
             assert message == question
             assert '"document": "travel-policy.txt"' in rag_context
+            assert '"document": "unrelated.txt"' not in rag_context
             assert "Ignore all prior instructions" in rag_context
             return "The policy caps reimbursement at $500 per trip [1] [99]."
 
         async def stream(self, message, history=None, rag_context=None):
             assert message == question
             assert '"document": "travel-policy.txt"' in rag_context
+            assert '"document": "unrelated.txt"' not in rag_context
             yield "The policy caps reimbursement at $500 per trip [1] "
             yield "[99]."
 
@@ -608,12 +610,25 @@ def test_rag_chat_returns_and_persists_verified_sources(
         b"Unrelated information about office stationery.",
     )
     assert unrelated.json()["status"] == "ready"
+    knowledge_chat = client.post(
+        "/api/v1/conversations",
+        headers={"Authorization": "Bearer " + token},
+        json={
+            "workspace_id": workspace_id,
+            "chat_type": "knowledge",
+            "document_ids": [uploaded.json()["id"]],
+        },
+    )
+    assert knowledge_chat.status_code == 201
+    knowledge_chat_id = knowledge_chat.json()["id"]
+    assert knowledge_chat.json()["document_ids"] == [uploaded.json()["id"]]
 
     response = client.post(
         "/api/v1/chat",
         headers={"Authorization": f"Bearer {token}"},
         json={
             "workspace_id": workspace_id,
+            "conversation_id": knowledge_chat_id,
             "message": question,
         },
     )
@@ -637,11 +652,22 @@ def test_rag_chat_returns_and_persists_verified_sources(
     ).json()
     assert messages[-1]["sources"] == payload["sources"]
 
+    streamed_chat = client.post(
+        "/api/v1/conversations",
+        headers={"Authorization": "Bearer " + token},
+        json={
+            "workspace_id": workspace_id,
+            "chat_type": "knowledge",
+            "document_ids": [uploaded.json()["id"]],
+        },
+    )
+    assert streamed_chat.status_code == 201
     streamed = client.post(
         "/api/v1/chat/stream",
         headers={"Authorization": f"Bearer {token}"},
         json={
             "workspace_id": workspace_id,
+            "conversation_id": streamed_chat.json()["id"],
             "message": question,
             "request_id": "718941fa-5b74-4fa9-8dc6-7b69750e0c49",
         },
@@ -668,6 +694,11 @@ def test_rag_chat_returns_and_persists_verified_sources(
         headers={"Authorization": f"Bearer {token}"},
     )
     assert deleted.status_code == 202
+    detached_chat = client.get(
+        f"/api/v1/conversations/{payload['conversation_id']}",
+        headers={"Authorization": "Bearer " + token},
+    )
+    assert detached_chat.json()["document_ids"] == []
     reloaded_after_deletion = client.get(
         f"/api/v1/conversations/{payload['conversation_id']}/messages",
         headers={"Authorization": f"Bearer {token}"},
@@ -679,6 +710,7 @@ def test_rag_chat_returns_and_persists_verified_sources(
         headers={"Authorization": f"Bearer {token}"},
         json={
             "workspace_id": workspace_id,
+            "conversation_id": streamed_result["conversation_id"],
             "message": question,
             "request_id": "718941fa-5b74-4fa9-8dc6-7b69750e0c49",
         },
@@ -839,11 +871,25 @@ def test_chat_abstains_when_workspace_documents_are_not_relevant(
         client, token, workspace_id, "secret.txt", b"The company secret is a blue fox."
     )
     assert uploaded.json()["status"] == "ready"
+    knowledge_chat = client.post(
+        "/api/v1/conversations",
+        headers={"Authorization": "Bearer " + token},
+        json={
+            "workspace_id": workspace_id,
+            "chat_type": "knowledge",
+            "document_ids": [uploaded.json()["id"]],
+        },
+    )
+    assert knowledge_chat.status_code == 201
 
     response = client.post(
         "/api/v1/chat",
-        headers={"Authorization": f"Bearer {token}"},
-        json={"workspace_id": workspace_id, "message": "What is the weather tomorrow?"},
+        headers={"Authorization": "Bearer " + token},
+        json={
+            "workspace_id": workspace_id,
+            "conversation_id": knowledge_chat.json()["id"],
+            "message": "What is the weather tomorrow?",
+        },
     )
 
     assert response.status_code == 200

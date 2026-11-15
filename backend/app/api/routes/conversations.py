@@ -1,3 +1,4 @@
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Query, Response, status
@@ -6,6 +7,7 @@ from app.api.deps import CurrentUser, DbSession
 from app.models.conversation import Conversation, Message
 from app.schemas.conversation import (
     ConversationCreate,
+    ConversationDocumentsUpdate,
     ConversationRename,
     ConversationResponse,
     MessageResponse,
@@ -18,6 +20,7 @@ from app.services.conversations import (
     list_messages,
     list_owned_conversations,
     rename_conversation,
+    update_conversation_documents,
 )
 from app.services.retrieval import validate_citations
 
@@ -29,16 +32,28 @@ def _conversation_response(conversation: Conversation) -> ConversationResponse:
         id=conversation.id,
         workspace_id=conversation.workspace_id,
         title=conversation.title,
+        chat_type=conversation.chat_type,
+        document_ids=[
+            association.document_id
+            for association in conversation.document_associations
+        ],
         created_at=conversation.created_at,
         updated_at=conversation.updated_at,
     )
 
 
 def _message_response(
-    db: DbSession, workspace_id: UUID, message: Message
+    db: DbSession,
+    workspace_id: UUID,
+    message: Message,
+    allowed_document_ids: set[UUID] | None = None,
 ) -> MessageResponse:
     content, associated_sources = validate_citations(
-        db, workspace_id, message.content, message.sources or []
+        db,
+        workspace_id,
+        message.content,
+        message.sources or [],
+        allowed_document_ids=allowed_document_ids,
     )
     return MessageResponse(
         id=message.id,
@@ -63,7 +78,14 @@ def post_conversation(
     db: DbSession,
 ) -> ConversationResponse:
     return _conversation_response(
-        create_conversation(db, user, body.workspace_id, body.title)
+        create_conversation(
+            db,
+            user,
+            body.workspace_id,
+            body.title,
+            body.chat_type,
+            body.document_ids,
+        )
     )
 
 
@@ -72,10 +94,13 @@ def get_conversations(
     user: CurrentUser,
     db: DbSession,
     workspace_id: UUID | None = Query(default=None),
+    chat_type: Literal["normal", "knowledge"] | None = Query(default=None),
 ) -> list[ConversationResponse]:
     return [
         _conversation_response(conversation)
-        for conversation in list_owned_conversations(db, user, workspace_id)
+        for conversation in list_owned_conversations(
+            db, user, workspace_id, chat_type
+        )
     ]
 
 
@@ -100,6 +125,23 @@ def patch_conversation(
     )
 
 
+@router.put(
+    "/{conversation_id}/documents",
+    response_model=ConversationResponse,
+)
+def put_conversation_documents(
+    conversation_id: UUID,
+    body: ConversationDocumentsUpdate,
+    user: CurrentUser,
+    db: DbSession,
+) -> ConversationResponse:
+    return _conversation_response(
+        update_conversation_documents(
+            db, conversation_id, user, body.document_ids
+        )
+    )
+
+
 @router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
 def remove_conversation(
     conversation_id: UUID,
@@ -117,7 +159,20 @@ def get_conversation_messages(
     db: DbSession,
 ) -> list[MessageResponse]:
     conversation = get_owned_conversation(db, conversation_id, user)
+    allowed_document_ids = (
+        {
+            association.document_id
+            for association in conversation.document_associations
+        }
+        if conversation.chat_type == "knowledge"
+        else set()
+    )
     return [
-        _message_response(db, conversation.workspace_id, message)
+        _message_response(
+            db,
+            conversation.workspace_id,
+            message,
+            allowed_document_ids,
+        )
         for message in list_messages(db, conversation_id, user)
     ]

@@ -23,7 +23,7 @@ _OUTBOX_REVISION = "0006_storage_cleanup_outbox"
 _BACKEND_REVISION = "0007_document_storage_backend"
 _AUDIT_REVISION = "0008_cleanup_replay_audit"
 _FULL_NAME_REVISION = "0009_user_full_name"
-_HEAD_REVISION = "0010_refresh_tokens"
+_HEAD_REVISION = "0011_chat_types"
 
 
 def _migration_config(database_url: str, monkeypatch) -> Config:
@@ -293,17 +293,22 @@ def test_full_downgrade_from_head_preserves_data_after_partial_downgrade(
     with pytest.raises(RuntimeError, match="unfinished cleanup tasks exist"):
         command.downgrade(config, _MIGRATION_BASE)
 
-    # SQLite completes the empty 0010 downgrade before 0009's data guard refuses.
-    expected_tables = before_tables - {"refresh_tokens"}
+    # SQLite completes the empty 0011 and 0010 downgrades before 0009's data guard refuses.
+    expected_tables = before_tables - {
+        "conversation_documents",
+        "refresh_tokens",
+    }
     assert set(inspect(engine).get_table_names()) == expected_tables
-    assert {
-        table: {column["name"] for column in inspect(engine).get_columns(table)}
-        for table in expected_tables
-    } == {
+    expected_columns = {
         table: columns
         for table, columns in before_columns.items()
         if table in expected_tables
     }
+    expected_columns["conversations"].remove("chat_type")
+    assert {
+        table: {column["name"] for column in inspect(engine).get_columns(table)}
+        for table in expected_tables
+    } == expected_columns
     with engine.connect() as connection:
         assert connection.scalar(text("SELECT version_num FROM alembic_version")) == (
             _FULL_NAME_REVISION

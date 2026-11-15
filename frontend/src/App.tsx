@@ -10,7 +10,8 @@ import {
   cancelChat, getMessages, getModel, KnowledgeDocument, listConversations,
   listKnowledgeDocuments, logout, ModelInfo, PersistedMessage,
   refreshSession, setAccessToken,
-  renameConversation, SourceReference, StreamMilestone, streamChat
+  renameConversation, SourceReference, StreamMilestone, streamChat,
+  updateConversationDocuments
 } from "./lib/api";
 import AuthPage, { AuthPageRoute } from "./AuthPage";
 import KnowledgeBase from "./KnowledgeBase";
@@ -90,6 +91,14 @@ export default function App() {
   const [renameTitle, setRenameTitle] = useState("");
   const [pendingDelete, setPendingDelete] = useState<Conversation | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [documentDialog, setDocumentDialog] = useState<{
+    conversationId: string | null;
+    selectedDocumentIds: string[];
+    error: string;
+  } | null>(null);
+  const [documentSaveBusy, setDocumentSaveBusy] = useState(false);
+  const [showAllNormalChats, setShowAllNormalChats] = useState(false);
+  const [showAllKnowledgeChats, setShowAllKnowledgeChats] = useState(false);
   const sendInFlight = useRef(false);
   const sidebarRef = useRef<HTMLElement>(null);
   const activeChatRequest = useRef<AbortController | null>(null);
@@ -108,6 +117,9 @@ export default function App() {
   } | null>(null);
   const conversationRequest = useRef(0);
   const conversationListRequest = useRef(0);
+  const normalChats = conversations.filter(conversation => conversation.chat_type !== "knowledge");
+  const knowledgeChats = conversations.filter(conversation => conversation.chat_type === "knowledge");
+  const activeConversation = conversations.find(item => item.id === conversationId) ?? null;
 
   useEffect(() => {
     const handlePopState = () => setAuthPage(authPageFromPath(window.location.pathname));
@@ -206,6 +218,17 @@ export default function App() {
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [mobileNav]);
+
+  useEffect(() => {
+    if (!documentDialog) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !documentSaveBusy) {
+        setDocumentDialog(null);
+      }
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [documentDialog, documentSaveBusy]);
 
   useEffect(() => {
     sidebarRef.current?.toggleAttribute("inert", !mobileNav);
@@ -376,16 +399,40 @@ export default function App() {
     setConversationError("");
   }
 
-  async function startNewConversation() {
-    if (!auth || !workspaceId || conversationBusy || busy) return;
+  function openDocumentDialog(conversation: Conversation | null = null) {
+    setDocumentDialog({
+      conversationId: conversation?.id ?? null,
+      selectedDocumentIds: conversation?.document_ids ?? [],
+      error: ""
+    });
+    setMobileNav(false);
+  }
+
+  async function startNewConversation(
+    chatType: "normal" | "knowledge" = "normal",
+    documentIds?: string[]
+  ): Promise<boolean> {
+    if (!auth || !workspaceId || conversationBusy || busy) return false;
+    if (chatType === "knowledge" && documentIds === undefined) {
+      openDocumentDialog();
+      return true;
+    }
     const requestId = ++conversationRequest.current;
     setMessagesLoading(false);
     setConversationBusy(true);
     setConversationError("");
     setChatError("");
     try {
-      const created = await createConversation(auth.access_token, workspaceId);
-      if (requestId !== conversationRequest.current) return;
+      const created = chatType === "normal" && documentIds === undefined
+        ? await createConversation(auth.access_token, workspaceId)
+        : await createConversation(
+            auth.access_token,
+            workspaceId,
+            "New conversation",
+            chatType,
+            documentIds ?? []
+          );
+      if (requestId !== conversationRequest.current) return false;
       conversationListRequest.current += 1;
       setConversationsLoading(false);
       setConversations(current => [created, ...current.filter(item => item.id !== created.id)]);
@@ -398,14 +445,74 @@ export default function App() {
       selectView("conversations");
       setRenameId(null);
       setMobileNav(false);
+      setDocumentDialog(null);
+      return true;
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         expireSession(error);
       } else {
-        setConversationError(error instanceof Error ? error.message : "Could not create a conversation.");
+        const message = error instanceof Error ? error.message : "Could not create a conversation.";
+        if (chatType === "knowledge" && documentDialog) {
+          setDocumentDialog(current => current ? { ...current, error: message } : current);
+        } else {
+          setConversationError(message);
+        }
       }
+      return false;
     } finally {
       setConversationBusy(false);
+    }
+  }
+
+  async function saveDocumentSelection() {
+    if (!auth || !documentDialog || documentSaveBusy) return;
+    if (documentDialog.selectedDocumentIds.length === 0) {
+      setDocumentDialog(current => current
+        ? { ...current, error: "Select at least one ready document." }
+        : current
+      );
+      return;
+    }
+    if (documentDialog.conversationId === null) {
+      setDocumentSaveBusy(true);
+      const created = await startNewConversation(
+        "knowledge",
+        documentDialog.selectedDocumentIds
+      );
+      setDocumentSaveBusy(false);
+      if (!created) {
+        setDocumentDialog(current => current
+          ? { ...current, error: current.error || "Could not create this Knowledge Chat." }
+          : current
+        );
+      }
+      return;
+    }
+    setDocumentSaveBusy(true);
+    try {
+      const updated = await updateConversationDocuments(
+        auth.access_token,
+        documentDialog.conversationId,
+        documentDialog.selectedDocumentIds
+      );
+      setConversations(current => current.map(item => item.id === updated.id ? updated : item));
+      setDocumentDialog(null);
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        expireSession(error);
+      } else {
+        setDocumentDialog(current => current
+          ? {
+              ...current,
+              error: error instanceof Error
+                ? error.message
+                : "Could not update this Knowledge Chat."
+            }
+          : current
+        );
+      }
+    } finally {
+      setDocumentSaveBusy(false);
     }
   }
 
@@ -505,6 +612,48 @@ export default function App() {
       }
     } finally {
       setDeleteBusy(false);
+    }
+  }
+
+  function renderConversationRows(items: Conversation[], showAll: boolean) {
+    const visibleItems = showAll ? items : items.slice(0, 2);
+    return <>
+      {visibleItems.map(conversation => <div className={`recent-row ${conversation.id === conversationId ? "selected" : ""}`} key={conversation.id}>
+        {renameId === conversation.id
+          ? <form className="rename-form" onSubmit={event => void submitRename(event, conversation)}>
+            <input aria-label="Conversation title" autoFocus maxLength={200} value={renameTitle} onChange={event => setRenameTitle(event.target.value)} />
+            <button type="submit" aria-label="Save conversation name" disabled={conversationBusy || !renameTitle.trim()}><Check size={14}/></button>
+            <button type="button" aria-label="Cancel rename" onClick={() => setRenameId(null)}><X size={14}/></button>
+          </form>
+          : <>
+            <button className={`recent-item ${conversation.id === conversationId ? "selected" : ""}`} onClick={() => void openConversation(conversation)} disabled={messagesLoading || conversationBusy || busy}>
+              <span className="recent-dot"/> <span className="recent-title">{conversation.title}</span>
+            </button>
+            <span className="conversation-actions">
+              <button type="button" aria-label={`Rename ${conversation.title}`} title="Rename conversation" onClick={() => {
+                setRenameId(conversation.id);
+                setRenameTitle(conversation.title);
+                setConversationError("");
+              }} disabled={conversationBusy || busy}><Pencil size={13}/></button>
+              <button type="button" aria-label={`Delete ${conversation.title}`} title="Delete conversation" onClick={() => setPendingDelete(conversation)} disabled={conversationBusy || deleteBusy || busy}><Trash2 size={13}/></button>
+            </span>
+          </>}
+      </div>)}
+      {items.length > 2 && <button
+        className="conversation-show-more"
+        type="button"
+        onClick={() => conversationGroupToggle(items[0]?.chat_type)}
+      >
+        {showAll ? "Show less" : `Show ${items.length - 2} more`}
+      </button>}
+    </>;
+  }
+
+  function conversationGroupToggle(chatType: "normal" | "knowledge" | undefined) {
+    if (chatType === "knowledge") {
+      setShowAllKnowledgeChats(value => !value);
+    } else {
+      setShowAllNormalChats(value => !value);
     }
   }
 
@@ -779,6 +928,7 @@ export default function App() {
         clearCurrentConversation();
       }} disabled={busy || conversationBusy}>{auth.workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select></label>
       <button className="new-chat" onClick={() => void startNewConversation()} disabled={!workspaceId || conversationBusy || busy}><Plus size={17}/> New conversation</button>
+      <button className="new-knowledge-chat" onClick={() => void startNewConversation("knowledge")} disabled={!workspaceId || conversationBusy || busy}><BookOpen size={16}/> New Knowledge Chat</button>
       <div className="nav-label">WORKSPACE</div>
       <nav className="nav-list">
         <button className={`nav-item ${activeView === "conversations" ? "active" : ""}`} onClick={() => selectView("conversations")}><MessageSquare size={17}/> Conversations <span className="nav-count">{conversations.length}</span></button>
@@ -786,31 +936,24 @@ export default function App() {
         <button className="nav-item unavailable-control" type="button" disabled title="Analytics is coming soon" aria-label="Analytics (coming soon)"><MessageSquare size={17}/> Analytics <span className="coming-soon-label">Coming soon</span></button>
         <button className="nav-item unavailable-control" type="button" disabled title="Integrations are coming soon" aria-label="Integrations (coming soon)"><Zap size={17}/> Integrations <span className="coming-soon-label">Coming soon</span></button>
       </nav>
-      <div className="nav-label recent-label">RECENT</div>
+      <div className="nav-label recent-label">RECENT CHATS</div>
       <div className="recent-list" aria-label="Conversation history">
         {conversationsLoading && <p className="conversation-list-state">Loading conversations…</p>}
         {!conversationsLoading && conversations.length === 0 && !conversationError && <p className="conversation-list-state">No conversations yet. Start a new one.</p>}
-        {!conversationsLoading && conversations.map(conversation => <div className={`recent-row ${conversation.id === conversationId ? "selected" : ""}`} key={conversation.id}>
-          {renameId === conversation.id
-            ? <form className="rename-form" onSubmit={event => void submitRename(event, conversation)}>
-              <input aria-label="Conversation title" autoFocus maxLength={200} value={renameTitle} onChange={event => setRenameTitle(event.target.value)} />
-              <button type="submit" aria-label="Save conversation name" disabled={conversationBusy || !renameTitle.trim()}><Check size={14}/></button>
-              <button type="button" aria-label="Cancel rename" onClick={() => setRenameId(null)}><X size={14}/></button>
-            </form>
-            : <>
-              <button className={`recent-item ${conversation.id === conversationId ? "selected" : ""}`} onClick={() => void openConversation(conversation)} disabled={messagesLoading || conversationBusy || busy}>
-                <span className="recent-dot"/> <span className="recent-title">{conversation.title}</span>
-              </button>
-              <span className="conversation-actions">
-                <button type="button" aria-label={`Rename ${conversation.title}`} title="Rename conversation" onClick={() => {
-                  setRenameId(conversation.id);
-                  setRenameTitle(conversation.title);
-                  setConversationError("");
-                }} disabled={conversationBusy || busy}><Pencil size={13}/></button>
-                <button type="button" aria-label={`Delete ${conversation.title}`} title="Delete conversation" onClick={() => setPendingDelete(conversation)} disabled={conversationBusy || deleteBusy || busy}><Trash2 size={13}/></button>
-              </span>
-            </>}
-        </div>)}
+        {!conversationsLoading && <>
+          <section className="conversation-group" aria-label="Normal Chats">
+            <h2>Normal Chats <span>{normalChats.length}</span></h2>
+            {normalChats.length
+              ? renderConversationRows(normalChats, showAllNormalChats)
+              : <p className="conversation-list-state">No normal chats yet.</p>}
+          </section>
+          <section className="conversation-group" aria-label="Knowledge Chats">
+            <h2>Knowledge Chats <span>{knowledgeChats.length}</span></h2>
+            {knowledgeChats.length
+              ? renderConversationRows(knowledgeChats, showAllKnowledgeChats)
+              : <p className="conversation-list-state">No knowledge chats yet.</p>}
+          </section>
+        </>}
       </div>
       {conversationError && <p className="conversation-error" role="alert">{conversationError}</p>}
       <div className="sidebar-bottom">
@@ -837,6 +980,12 @@ export default function App() {
           <div className="topbar-brand"><span className="brand-mark"><Sparkles size={17}/></span><span className="brand-name">nexa<span>desk</span></span></div>
         </div>
         <div className="topbar-actions">
+          {activeConversation?.chat_type === "knowledge" && activeView === "conversations" && <button
+            className="manage-sources-button"
+            type="button"
+            onClick={() => openDocumentDialog(activeConversation)}
+            disabled={busy || conversationBusy || documentSaveBusy}
+          ><BookOpen size={15}/> Sources</button>}
           <button className="model-selector topbar-model unavailable-control" type="button" disabled title="Configured AI provider and model" aria-label="Configured AI model"><span className="model-orb"><Bot size={14}/></span>{modelLabel}</button>
           <button className="icon-button unavailable-control" type="button" disabled title="Help is coming soon" aria-label="Help (coming soon)"><CircleHelp size={18}/></button>
         </div>
@@ -852,6 +1001,15 @@ export default function App() {
             onDocumentsChange={(sourceWorkspaceId, documents) => {
               if (sourceWorkspaceId !== currentWorkspaceId.current) return;
               setKnowledgeDocuments(documents);
+              const documentIds = new Set(documents.map(document => document.id));
+              setConversations(current => current.map(conversation =>
+                conversation.chat_type === "knowledge"
+                  ? {
+                      ...conversation,
+                      document_ids: (conversation.document_ids ?? []).filter(id => documentIds.has(id))
+                    }
+                  : conversation
+              ));
               setKnowledgeError("");
             }}
           />
@@ -934,6 +1092,84 @@ export default function App() {
           </div>
         </section>}
     </main>
+    {documentDialog && <div
+      className="dialog-scrim"
+      role="presentation"
+      onMouseDown={event => {
+        if (event.target === event.currentTarget && !documentSaveBusy) {
+          setDocumentDialog(null);
+        }
+      }}
+    >
+      <section
+        className="document-picker-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="document-picker-title"
+        aria-describedby="document-picker-description"
+      >
+        <div className="document-picker-heading">
+          <div>
+            <h2 id="document-picker-title">
+              {documentDialog.conversationId ? "Manage Knowledge Chat sources" : "Create a Knowledge Chat"}
+            </h2>
+            <p id="document-picker-description">
+              This chat can retrieve evidence only from the ready documents you select.
+            </p>
+          </div>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="Close document selection"
+            onClick={() => setDocumentDialog(null)}
+            disabled={documentSaveBusy}
+          ><X size={18}/></button>
+        </div>
+        {knowledgeLoading
+          ? <p className="document-picker-state" role="status">Loading workspace documents…</p>
+          : knowledgeError
+            ? <p className="document-picker-error" role="alert">{knowledgeError}</p>
+            : knowledgeDocuments.filter(document => document.status === "ready").length === 0
+              ? <div className="document-picker-empty">
+                <p>No ready documents are available in this workspace.</p>
+                <button type="button" onClick={() => {
+                  setDocumentDialog(null);
+                  selectView("knowledge");
+                }}>Open Knowledge Base</button>
+              </div>
+              : <div className="document-picker-list">
+                {knowledgeDocuments
+                  .filter(document => document.status === "ready")
+                  .map(document => <label className="document-picker-option" key={document.id}>
+                    <input
+                      type="checkbox"
+                      checked={documentDialog.selectedDocumentIds.includes(document.id)}
+                      onChange={event => setDocumentDialog(current => current
+                        ? {
+                            ...current,
+                            error: "",
+                            selectedDocumentIds: event.target.checked
+                              ? [...current.selectedDocumentIds, document.id]
+                              : current.selectedDocumentIds.filter(id => id !== document.id)
+                          }
+                        : current
+                      )}
+                    />
+                    <FileText size={17}/>
+                    <span>{document.filename}</span>
+                  </label>)}
+              </div>}
+        {documentDialog.error && <p className="document-picker-error" role="alert">{documentDialog.error}</p>}
+        <div className="dialog-actions">
+          <button type="button" onClick={() => setDocumentDialog(null)} disabled={documentSaveBusy}>Cancel</button>
+          <button
+            type="button"
+            onClick={() => void saveDocumentSelection()}
+            disabled={documentSaveBusy || knowledgeLoading || Boolean(knowledgeError) || !knowledgeDocuments.some(document => document.status === "ready")}
+          >{documentSaveBusy ? "Saving…" : documentDialog.conversationId ? "Save sources" : "Create Knowledge Chat"}</button>
+        </div>
+      </section>
+    </div>}
     {pendingDelete && <div className="dialog-scrim" role="presentation">
       <section className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-description">
         <h2 id="delete-title">Delete conversation?</h2>

@@ -9,6 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.deps import CurrentUser, DbSession
 from app.core.config import get_settings
+from app.models.conversation import ConversationDocument
 from app.models.knowledge import KnowledgeChunk, KnowledgeDocument
 from app.models.storage_cleanup import StorageCleanupTask
 from app.schemas.knowledge import KnowledgeDocumentResponse
@@ -337,6 +338,12 @@ def delete_document(
             delete(KnowledgeChunk).where(
                 KnowledgeChunk.document_id == document.id,
                 KnowledgeChunk.workspace_id == workspace_id,
+            )
+        )
+        db.execute(
+            delete(ConversationDocument).where(
+                ConversationDocument.document_id == document.id,
+                ConversationDocument.workspace_id == workspace_id,
             )
         )
         db.delete(document)
