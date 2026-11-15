@@ -1,0 +1,29 @@
+﻿# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local databases and backups
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# Uploads and generated data
+data/
+uploads/
+
+# Build and tooling
+dist/
+build/
+.coverage
+htmlcov/

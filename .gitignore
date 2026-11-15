@@ -1,0 +1,43 @@
+﻿# Secrets
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Databases and backups
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+# Database backups
+*.db.backup*
+*.backup-*
+
+# Uploaded documents and generated data
+backend/data/
+backend/uploads/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+
+# Build output
+build/
+dist/
+
+# Nested Git history backup
+backend/.git-backup/
