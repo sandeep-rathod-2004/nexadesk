@@ -52,7 +52,7 @@ const firstConversation = {
   updated_at: "2026-01-01T00:00:00Z"
 };
 
-async function signIn(user = userEvent.setup()) {
+async function signIn(user = userEvent.setup(), openNavigation = true) {
   window.history.replaceState(null, "", "/login");
   api.login.mockResolvedValue(access);
   render(<App />);
@@ -60,7 +60,11 @@ async function signIn(user = userEvent.setup()) {
   fireEvent.change(screen.getByLabelText("Email"), { target: { value: "person@example.com" } });
   fireEvent.change(screen.getByLabelText("Password"), { target: { value: "a sufficiently long password" } });
   await user.click(screen.getByRole("button", { name: "Sign in" }));
-  await screen.findByRole("button", { name: /New conversation/ });
+  await screen.findByRole("heading", { name: "How can I help you today?" });
+  if (openNavigation) {
+    await user.click(screen.getByRole("button", { name: "Open menu" }));
+    await screen.findByRole("button", { name: /New conversation/ });
+  }
   return user;
 }
 
@@ -69,6 +73,7 @@ describe("conversation management UI", () => {
     vi.clearAllMocks();
     window.history.replaceState(null, "", "/login");
     window.sessionStorage.clear();
+    window.localStorage.clear();
     api.refreshSession.mockRejectedValue(new api.ApiError("No session", 401));
     api.logout.mockResolvedValue(undefined);
     api.listConversations.mockResolvedValue([]);
@@ -179,6 +184,54 @@ describe("conversation management UI", () => {
     });
   });
 
+  it("shows a real chat empty state and submits a suggestion through streaming", async () => {
+    api.streamChat.mockResolvedValue({
+      reply: "A useful explanation.",
+      model: "phi3:mini",
+      conversation_id: "conversation-1",
+      grounded: false,
+      sources: []
+    });
+    const user = await signIn(userEvent.setup(), false);
+
+    expect(screen.getByRole("heading", { name: "How can I help you today?" })).toBeTruthy();
+    expect(screen.getByText("Ask anything. Let's figure it out together.")).toBeTruthy();
+    expect(screen.queryByText(/Hey there! I’m NexaDesk/)).toBeNull();
+    expect(document.querySelectorAll(".prompt-card")).toHaveLength(3);
+
+    await user.click(screen.getByRole("button", { name: "Help me write something" }));
+
+    await waitFor(() => expect(api.streamChat).toHaveBeenCalledWith(
+      "Help me write something",
+      "in-memory-token",
+      "workspace-1",
+      null,
+      expect.any(String),
+      expect.any(AbortSignal),
+      expect.any(Function),
+      expect.any(Function)
+    ));
+    expect(await screen.findByText("A useful explanation.")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "How can I help you today?" })).toBeNull();
+  });
+
+  it("opens and dismisses the navigation drawer and first-use hint", async () => {
+    const user = await signIn(userEvent.setup(), false);
+
+    expect(screen.getByText("Open navigation — Explore your workspace features")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Open menu" }));
+    expect(screen.queryByText("Open navigation — Explore your workspace features")).toBeNull();
+    expect(screen.getByRole("button", { name: /New conversation/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Analytics (coming soon)" }).hasAttribute("disabled")).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: "Close navigation" }));
+    expect(screen.getByRole("button", { name: "Open menu" }).getAttribute("aria-expanded")).toBe("false");
+    await user.click(screen.getByRole("button", { name: "Open menu" }));
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("button", { name: "Open menu" }).getAttribute("aria-expanded")).toBe("false");
+    expect(window.localStorage.getItem("nexadesk.navigation-hint.user-1")).toBe("dismissed");
+  });
+
   it("shows the backend-configured Ollama model", async () => {
     await signIn();
 
@@ -250,19 +303,19 @@ describe("conversation management UI", () => {
 
     try {
       await signIn();
-      expect(screen.getByRole("heading", { name: /Good morning\./ })).toBeTruthy();
+      expect(screen.getByText("Good morning")).toBeTruthy();
 
       localHour = 12;
       act(() => updateGreeting?.());
-      expect(screen.getByRole("heading", { name: /Good afternoon\./ })).toBeTruthy();
+      expect(screen.getByText("Good afternoon")).toBeTruthy();
 
       localHour = 17;
       act(() => updateGreeting?.());
-      expect(screen.getByRole("heading", { name: /Good evening\./ })).toBeTruthy();
+      expect(screen.getByText("Good evening")).toBeTruthy();
 
       localHour = 4;
       act(() => updateGreeting?.());
-      expect(screen.getByRole("heading", { name: /Good evening\./ })).toBeTruthy();
+      expect(screen.getByText("Good evening")).toBeTruthy();
     } finally {
       hourSpy.mockRestore();
       intervalSpy.mockRestore();
@@ -277,6 +330,7 @@ describe("conversation management UI", () => {
       "in-memory-token",
       "workspace-1"
     );
+    await user.click(screen.getByRole("button", { name: "Open menu" }));
     const conversationButton = await screen.findByRole("button", { name: /^Planning notes$/ });
     await user.click(conversationButton);
     await waitFor(() => expect(api.getMessages).toHaveBeenCalledWith(
@@ -284,6 +338,7 @@ describe("conversation management UI", () => {
       "conversation-1"
     ));
 
+    await user.click(screen.getByRole("button", { name: "Open menu" }));
     await user.click(screen.getByRole("button", { name: "Rename Planning notes" }));
     const titleInput = screen.getByRole("textbox", { name: "Conversation title" });
     await user.clear(titleInput);
@@ -425,6 +480,8 @@ describe("conversation management UI", () => {
 
     render(<App />);
 
+    await screen.findByRole("heading", { name: "How can I help you today?" });
+    await userEvent.setup().click(screen.getByRole("button", { name: "Open menu" }));
     await screen.findByRole("button", { name: /New conversation/ });
     expect(api.setAccessToken).toHaveBeenCalledWith("in-memory-token");
     expect(
@@ -526,6 +583,7 @@ describe("conversation management UI", () => {
 
     rejectMessages?.(new Error("Conversation could not be loaded."));
     expect(await screen.findByRole("alert")).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Open menu" }));
     expect(await screen.findByRole("button", { name: /^Planning notes$/ })).toBeTruthy();
   });
 

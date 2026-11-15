@@ -1,8 +1,8 @@
 import { FormEvent, lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
   ArrowUp, Bot, BookOpen, ChevronDown, CircleHelp,
-  Check, FileText, LifeBuoy, LockKeyhole, Menu, MessageSquare, MoreHorizontal,
-  Pencil, Plus, Settings2, ShieldCheck, Sparkles, ThumbsDown, ThumbsUp, Trash2, X, Zap,
+  Check, FileText, LockKeyhole, Menu, MessageSquare,
+  Pencil, Plus, Settings2, Sparkles, ThumbsDown, ThumbsUp, Trash2, X, Zap,
   LogOut
 } from "lucide-react";
 import {
@@ -25,15 +25,11 @@ type Message = {
   sources?: SourceReference[];
   status?: "completed" | "interrupted" | "generating";
 };
-const initial: Message[] = [{
-  id: "welcome", role: "assistant",
-  content: "Hey there! I’m NexaDesk, your AI workspace assistant. Ask me a question, explore an idea, or start with one of the prompts below. I’ll be transparent when I can’t verify something.",
-  time: "Now"
-}];
+const initial: Message[] = [];
 const prompts = [
-  { icon: BookOpen, title: "Explain a complex topic", detail: "Break it down into simple steps" },
-  { icon: FileText, title: "Draft a customer response", detail: "Clear, helpful and on-brand" },
-  { icon: Sparkles, title: "Brainstorm new ideas", detail: "Explore possibilities together" }
+  { icon: BookOpen, title: "Explain a complex topic" },
+  { icon: FileText, title: "Help me write something" },
+  { icon: Sparkles, title: "Brainstorm new ideas" }
 ];
 
 function greetingForHour(hour: number): string {
@@ -61,11 +57,16 @@ function conversationStorageKey(userId: string, workspaceId: string): string {
   return `nexadesk.conversation.${userId}.${workspaceId}`;
 }
 
+function navigationHintKey(userId: string): string {
+  return `nexadesk.navigation-hint.${userId}`;
+}
+
 export default function App() {
   const [messages, setMessages] = useState<Message[]>(initial);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
+  const [navigationHintVisible, setNavigationHintVisible] = useState(false);
   const [activeView, setActiveView] = useState<"conversations" | "knowledge">("conversations");
   const [auth, setAuth] = useState<AuthResult | null>(null);
   const [authRestoring, setAuthRestoring] = useState(true);
@@ -90,6 +91,7 @@ export default function App() {
   const [pendingDelete, setPendingDelete] = useState<Conversation | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const sendInFlight = useRef(false);
+  const sidebarRef = useRef<HTMLElement>(null);
   const activeChatRequest = useRef<AbortController | null>(null);
   const activeRequestId = useRef<string | null>(null);
   const stopRequested = useRef(false);
@@ -187,6 +189,29 @@ export default function App() {
   }, [auth]);
 
   useEffect(() => {
+    if (!auth) {
+      setNavigationHintVisible(false);
+      return;
+    }
+    setNavigationHintVisible(
+      window.localStorage.getItem(navigationHintKey(auth.user.id)) !== "dismissed"
+    );
+  }, [auth]);
+
+  useEffect(() => {
+    if (!mobileNav) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileNav(false);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [mobileNav]);
+
+  useEffect(() => {
+    sidebarRef.current?.toggleAttribute("inert", !mobileNav);
+  }, [mobileNav]);
+
+  useEffect(() => {
     if (!auth || !workspaceId) {
       setKnowledgeDocuments([]);
       setKnowledgeLoading(false);
@@ -262,8 +287,17 @@ export default function App() {
 
   function selectView(view: "conversations" | "knowledge") {
     setActiveView(view);
+    setMobileNav(false);
     if (auth) {
       window.sessionStorage.setItem(viewStorageKey(auth.user.id), view);
+    }
+  }
+
+  function openNavigation() {
+    setMobileNav(true);
+    setNavigationHintVisible(false);
+    if (auth) {
+      window.localStorage.setItem(navigationHintKey(auth.user.id), "dismissed");
     }
   }
 
@@ -380,6 +414,7 @@ export default function App() {
     preserveView = false
   ) {
     if (!auth) return;
+    setMobileNav(false);
     const requestId = ++conversationRequest.current;
     if (!preserveView) selectView("conversations");
     setConversationId(conversation.id);
@@ -496,9 +531,9 @@ export default function App() {
     }
   }
 
-  async function submit(e?: FormEvent) {
+  async function submit(e?: FormEvent, suggestedText?: string) {
     e?.preventDefault();
-    const text = input.trim();
+    const text = (suggestedText ?? input).trim();
     if (!text || busy || sendInFlight.current || !auth || !workspaceId) return;
     const clickedAt = performance.now();
     let firstTokenPaintLogged = false;
@@ -732,7 +767,7 @@ export default function App() {
   }
 
   return <div className="app-shell">
-    <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
+    <aside ref={sidebarRef} id="workspace-navigation" className={`sidebar ${mobileNav ? "sidebar-open" : ""}`} aria-label="Workspace navigation" aria-hidden={!mobileNav}>
       <div className="brand-row"><div className="brand-mark"><Sparkles size={19}/></div><span className="brand-name">nexa<span>desk</span></span><button className="icon-button mobile-close" onClick={() => setMobileNav(false)} aria-label="Close menu"><X size={18}/></button></div>
       <label className="workspace-switch"><div className="workspace-avatar">N</div><div className="workspace-copy"><strong>{auth.workspaces.find(item => item.id === workspaceId)?.name ?? "Workspace"}</strong><small>{auth.user.email}</small></div><ChevronDown size={15} aria-hidden="true"/><select aria-label="Select workspace" value={workspaceId} onChange={event => {
         const selectedId = event.target.value;
@@ -746,14 +781,8 @@ export default function App() {
       <button className="new-chat" onClick={() => void startNewConversation()} disabled={!workspaceId || conversationBusy || busy}><Plus size={17}/> New conversation</button>
       <div className="nav-label">WORKSPACE</div>
       <nav className="nav-list">
-        <button className={`nav-item ${activeView === "conversations" ? "active" : ""}`} onClick={() => {
-          selectView("conversations");
-          setMobileNav(false);
-        }}><MessageSquare size={17}/> Conversations <span className="nav-count">{conversations.length}</span></button>
-        <button className={`nav-item ${activeView === "knowledge" ? "active" : ""}`} onClick={() => {
-          selectView("knowledge");
-          setMobileNav(false);
-        }}><BookOpen size={17}/> Knowledge base</button>
+        <button className={`nav-item ${activeView === "conversations" ? "active" : ""}`} onClick={() => selectView("conversations")}><MessageSquare size={17}/> Conversations <span className="nav-count">{conversations.length}</span></button>
+        <button className={`nav-item ${activeView === "knowledge" ? "active" : ""}`} onClick={() => selectView("knowledge")}><BookOpen size={17}/> Knowledge base</button>
         <button className="nav-item unavailable-control" type="button" disabled title="Analytics is coming soon" aria-label="Analytics (coming soon)"><MessageSquare size={17}/> Analytics <span className="coming-soon-label">Coming soon</span></button>
         <button className="nav-item unavailable-control" type="button" disabled title="Integrations are coming soon" aria-label="Integrations (coming soon)"><Zap size={17}/> Integrations <span className="coming-soon-label">Coming soon</span></button>
       </nav>
@@ -785,16 +814,32 @@ export default function App() {
       </div>
       {conversationError && <p className="conversation-error" role="alert">{conversationError}</p>}
       <div className="sidebar-bottom">
+        <div className="sidebar-progress">
+          <div className="rail-title"><span>GETTING STARTED</span><span className="completion">{knowledgeLoading ? "Loading…" : `${completedSteps} of 4`}</span></div>
+          <div className="check-progress" role="progressbar" aria-label="Getting started progress" aria-valuemin={0} aria-valuemax={4} aria-valuenow={completedSteps} aria-valuetext={`${completedSteps} of 4 steps complete`}><span style={{ width: `${progressPercent}%` }}/></div>
+          <div className={`sidebar-progress-step ${workspaceCreated ? "done" : ""}`}>{workspaceCreated ? <Check size={12}/> : null}<span>{workspaceCreated ? "Workspace available" : "Create or join a workspace"}</span></div>
+          <div className={`sidebar-progress-step ${knowledgeConnected ? "done" : ""}`}>{knowledgeConnected ? <Check size={12}/> : null}<span>{knowledgeLoading ? "Checking workspace sources…" : knowledgeError ? "Knowledge status unavailable" : knowledgeConnected ? "A document is ready" : knowledgeDocuments.some(document => document.status === "processing") ? "Documents are processing" : "Add a ready source document"}</span></div>
+          <div className="sidebar-progress-step unavailable-step"><span><strong>Customize assistant</strong><small>Coming soon · no saved customization is available</small></span></div>
+          <div className="sidebar-progress-step unavailable-step"><span><strong>Install on your site</strong><small>Coming soon · installation is not available</small></span></div>
+        </div>
         <div className="usage-card"><div className="usage-top"><span>Your role</span><span>{activeWorkspace?.role ?? "Unavailable"}</span></div><small>Conversations are saved to this workspace</small></div>
+        <div className="sidebar-provider-note"><strong>AI provider &amp; processing</strong><span>{providerProcessingMessage}</span></div>
         <button className="nav-item unavailable-control" type="button" disabled title="Settings are coming soon" aria-label="Settings (coming soon)"><Settings2 size={17}/> Settings <span className="coming-soon-label">Coming soon</span></button>
         <button className="profile-row" onClick={signOut}><div className="profile-avatar">{auth.user.email.slice(0, 2).toUpperCase()}</div><div className="profile-copy"><strong>{auth.user.email}</strong><small>Sign out</small></div><LogOut size={17} className="muted"/></button>
       </div>
     </aside>
     {mobileNav && <button className="mobile-scrim" onClick={() => setMobileNav(false)} aria-label="Close navigation"/>}
-    <main className="main-panel">
+    <main className={`main-panel ${activeView === "conversations" ? "chat-main-panel" : ""}`}>
       <header className="topbar">
-        <div className="topbar-left"><button className="icon-button mobile-menu" onClick={() => setMobileNav(true)} aria-label="Open menu"><Menu size={19}/></button><div className="breadcrumb">Workspace <span>/</span> <strong>{activeView === "knowledge" ? "Knowledge base" : "Conversations"}</strong></div></div>
-        <div className="topbar-actions"><div className={`status-pill ${modelInfo ? "provider-ready" : "provider-unavailable"}`} aria-live="polite"><span aria-hidden="true"/>{modelInfo?.provider ?? (modelInfoUnavailable ? "Provider unavailable" : "Loading provider…")}</div><button className="icon-button unavailable-control" type="button" disabled title="Help is coming soon" aria-label="Help (coming soon)"><CircleHelp size={18}/></button><button className="icon-button unavailable-control" type="button" disabled title="More options are coming soon" aria-label="More options (coming soon)"><MoreHorizontal size={19}/></button></div>
+        <div className="topbar-left">
+          <button className="icon-button nav-toggle" onClick={openNavigation} aria-label="Open menu" aria-controls="workspace-navigation" aria-expanded={mobileNav}><Menu size={21}/></button>
+          {navigationHintVisible && <div className="navigation-hint" role="status">Open navigation — Explore your workspace features</div>}
+          <div className="topbar-brand"><span className="brand-mark"><Sparkles size={17}/></span><span className="brand-name">nexa<span>desk</span></span></div>
+        </div>
+        <div className="topbar-actions">
+          <button className="model-selector topbar-model unavailable-control" type="button" disabled title="Configured AI provider and model" aria-label="Configured AI model"><span className="model-orb"><Bot size={14}/></span>{modelLabel}</button>
+          <button className="icon-button unavailable-control" type="button" disabled title="Help is coming soon" aria-label="Help (coming soon)"><CircleHelp size={18}/></button>
+        </div>
       </header>
       {activeView === "knowledge"
         ? <KnowledgeBase
@@ -811,88 +856,83 @@ export default function App() {
             }}
           />
         : <section className="chat-layout" id="chat">
-        <div className="chat-column">
-          <div className="chat-heading"><div><div className="eyebrow"><span className="eyebrow-line"/> YOUR AI WORKSPACE</div><h1>{greeting}. <span>Let’s make progress.</span></h1><p>A thoughtful assistant for the work that matters.</p></div><button className="model-selector unavailable-control" type="button" disabled title="Model selection is not available" aria-label="Configured AI model"><span className="model-orb"><Bot size={15}/></span> {modelLabel}</button></div>
-          <div className="conversation"><div className="date-divider"><span/> TODAY <span/></div>
-            {messagesLoading
-              ? <p className="history-state" role="status">Loading conversation…</p>
-              : messages.map(m => <article className={`message-row ${m.role}`} key={m.id}>
-                <div className={`message-avatar ${m.role}`}>{m.role === "assistant" ? <Sparkles size={16}/> : auth.user.email.slice(0, 2).toUpperCase()}</div>
-                <div className="message-body">
-                  <div className="message-meta">
-                    <strong>{m.role === "assistant" ? "NexaDesk" : "You"}</strong>
-                    <span>{m.time}</span>
+          <div className="chat-column">
+            <div className={`conversation ${messages.length === 0 && !messagesLoading ? "conversation-empty" : ""}`} role="log" aria-live="polite">
+              {messagesLoading
+                ? <p className="history-state" role="status">Loading conversation…</p>
+                : messages.length === 0
+                  ? <div className="empty-state">
+                    <span className="empty-state-icon"><Sparkles size={25}/></span>
+                    <p className="empty-greeting">{greeting}</p>
+                    <h1>How can I help you today?</h1>
+                    <p className="empty-subtitle">Ask anything. Let&apos;s figure it out together.</p>
+                    <div className="prompt-grid">{prompts.map(({icon: Icon, title}) => <button className="prompt-card" key={title} onClick={() => void submit(undefined, title)}><span className="prompt-icon"><Icon size={17}/></span><strong>{title}</strong><ArrowUp size={15} className="prompt-arrow"/></button>)}</div>
                   </div>
-                  <div className="message-content">
-                    {m.role === "assistant"
-                      ? <Suspense fallback={<div>{m.content}</div>}><MarkdownMessage content={m.content}/></Suspense>
-                      : m.content}
-                  </div>
-                  {m.status === "interrupted" && <span className="message-interrupted" role="status">
-                    Generation stopped · this is an incomplete response
-                  </span>}
-                  {m.sources && m.sources.length > 0 && <div className="message-sources" aria-label="Sources">
-                    {m.sources.map((source, index) => <details className="message-source" key={source.chunk_id ?? source.id}>
-                      <summary>{source.citation_label ?? `[${index + 1}]`} {source.document_name} · {source.location}</summary>
-                      {source.claims?.map((claim, claimIndex) => <p className="message-source-claim" key={`${claimIndex}-${claim}`}>Supports: {claim}</p>)}
-                      <p>{source.excerpt}</p>
-                    </details>)}
-                  </div>}
-                  {m.role === "assistant" && m.id !== "welcome" && <div className="message-tools">
-                    <button type="button" disabled title="Message feedback is coming soon" aria-label="Helpful (coming soon)"><ThumbsUp size={14}/></button>
-                    <button type="button" disabled title="Message feedback is coming soon" aria-label="Not helpful (coming soon)"><ThumbsDown size={14}/></button>
-                  </div>}
-                </div>
-              </article>)}
-            {busy && messages[messages.length - 1]?.content === "" && <article className="message-row assistant"><div className="message-avatar assistant"><Sparkles size={16}/></div><div className="message-body"><div className="message-meta"><strong>NexaDesk</strong><span>Thinking</span></div><div className="typing"><i/><i/><i/></div></div></article>}
-          </div>
-          {messages.length === 1 && <div className="prompt-grid">{prompts.map(({icon: Icon, title, detail}) => <button className="prompt-card" key={title} onClick={() => setInput(title)}><span className="prompt-icon"><Icon size={17}/></span><span><strong>{title}</strong><small>{detail}</small></span><ArrowUp size={15} className="prompt-arrow"/></button>)}</div>}
-          <form className="composer" onSubmit={submit}>
-            <textarea
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === "Escape" && busy) {
-                  e.preventDefault();
-                  void stopGeneration();
-                } else if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  void submit();
-                }
-              }}
-              placeholder="Message NexaDesk…"
-              rows={2}
-              maxLength={4000}
-              aria-label="Message NexaDesk"
-              disabled={messagesLoading}
-            />
-            <div className="composer-footer">
-              <div className="composer-hints"><button type="button" className="attach-control unavailable-control" disabled title="File attachments are coming soon" aria-label="Attach files (coming soon)"><Plus size={15}/> Attach</button><span className="hint-divider"/><span><LockKeyhole size={13}/> Saved to workspace</span></div>
-              <div className="send-side">
-                <small>{input.length}/4000</small>
-                {busy
-                  ? <button className="stop-button" type="button" onClick={() => void stopGeneration()} aria-label="Stop generating">
-                      <X size={15}/><span>{stopPending ? "Stopping…" : "Stop"}</span>
-                    </button>
-                  : <button className="send-button" type="submit" disabled={!input.trim() || messagesLoading} aria-label="Send message"><ArrowUp size={18}/></button>}
-              </div>
+                  : messages.map(m => <article className={`message-row ${m.role}`} key={m.id}>
+                    <div className={`message-avatar ${m.role}`}>{m.role === "assistant" ? <Sparkles size={16}/> : auth.user.email.slice(0, 2).toUpperCase()}</div>
+                    <div className="message-body">
+                      <div className="message-meta">
+                        <strong>{m.role === "assistant" ? "NexaDesk" : "You"}</strong>
+                        <span>{m.time}</span>
+                      </div>
+                      <div className="message-content">
+                        {m.role === "assistant"
+                          ? <Suspense fallback={<div>{m.content}</div>}><MarkdownMessage content={m.content}/></Suspense>
+                          : m.content}
+                      </div>
+                      {m.status === "interrupted" && <span className="message-interrupted" role="status">
+                        Generation stopped · this is an incomplete response
+                      </span>}
+                      {m.sources && m.sources.length > 0 && <div className="message-sources" aria-label="Sources">
+                        {m.sources.map((source, index) => <details className="message-source" key={source.chunk_id ?? source.id}>
+                          <summary>{source.citation_label ?? `[${index + 1}]`} {source.document_name} · {source.location}</summary>
+                          {source.claims?.map((claim, claimIndex) => <p className="message-source-claim" key={`${claimIndex}-${claim}`}>Supports: {claim}</p>)}
+                          <p>{source.excerpt}</p>
+                        </details>)}
+                      </div>}
+                      {m.role === "assistant" && <div className="message-tools">
+                        <button type="button" disabled title="Message feedback is coming soon" aria-label="Helpful (coming soon)"><ThumbsUp size={14}/></button>
+                        <button type="button" disabled title="Message feedback is coming soon" aria-label="Not helpful (coming soon)"><ThumbsDown size={14}/></button>
+                      </div>}
+                    </div>
+                  </article>)}
+              {busy && messages[messages.length - 1]?.content === "" && <article className="message-row assistant"><div className="message-avatar assistant"><Sparkles size={16}/></div><div className="message-body"><div className="message-meta"><strong>NexaDesk</strong><span>Thinking</span></div><div className="typing"><i/><i/><i/></div></div></article>}
             </div>
-          </form>
-          {chatError && <div className="chat-error" role="alert">{chatError}</div>}
-          <div className="disclaimer"><ShieldCheck size={13}/> AI can make mistakes. Verify important information before acting.</div>
-        </div>
-        <aside className="right-rail">
-          <div className="rail-card welcome-card"><div className="rail-card-top"><span className="mini-icon purple"><Zap size={15}/></span><span className="rail-kicker">WORKSPACE OVERVIEW</span></div><h3>{activeWorkspace?.name ?? "Workspace"}</h3><p>Conversations and knowledge for this workspace.</p><div className="overview-stats"><div><strong>{conversations.length}</strong><small>Conversations</small></div><div><strong>{knowledgeLoading ? "…" : knowledgeError ? "—" : knowledgeDocuments.length}</strong><small>Documents</small></div></div></div>
-          <div className="rail-card"><div className="rail-title"><span>GETTING STARTED</span><span className="completion">{knowledgeLoading ? "Loading…" : `${completedSteps} of 4`}</span></div><div className="check-progress" role="progressbar" aria-label="Getting started progress" aria-valuemin={0} aria-valuemax={4} aria-valuenow={completedSteps} aria-valuetext={`${completedSteps} of 4 steps complete`}><span style={{ width: `${progressPercent}%` }}/></div><div className="checklist">
-            <div className={`check-row ${workspaceCreated ? "done" : ""}`}><span className="check-circle">{workspaceCreated ? <Check size={11}/> : null}</span><span><strong>Workspace created</strong><small>{workspaceCreated ? "Workspace available" : "Create or join a workspace"}</small></span></div>
-            <div className={`check-row ${knowledgeConnected ? "done" : ""}`}><span className="check-circle">{knowledgeConnected ? <Check size={11}/> : null}</span><span><strong>Connect knowledge</strong><small>{knowledgeLoading ? "Checking workspace sources…" : knowledgeError ? "Knowledge status unavailable" : knowledgeConnected ? "A document is ready" : knowledgeDocuments.some(document => document.status === "processing") ? "Documents are processing" : "Add a ready source document"}</small></span></div>
-            <div className="check-row unavailable-step"><span className="check-circle"/><span><strong>Customize assistant</strong><small>Coming soon · no saved customization is available</small></span></div>
-            <div className="check-row unavailable-step"><span className="check-circle"/><span><strong>Install on your site</strong><small>Coming soon · installation is not available</small></span></div>
-          </div></div>
-          <div className="rail-card security-card"><div className="security-icon"><ShieldCheck size={17}/></div><div><strong>AI provider &amp; processing</strong><p>{providerProcessingMessage}</p></div></div>
-          <div className="rail-footer"><button className="help-center-control unavailable-control" type="button" disabled title="Help center is coming soon"><LifeBuoy size={13}/> Help center <span className="sr-only">(coming soon)</span></button><span>v0.1.0 · Preview</span></div>
-        </aside>
-      </section>}
+            {conversationError && <div className="chat-error" role="alert">{conversationError}</div>}
+            <form className="composer" onSubmit={submit}>
+              <textarea
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === "Escape" && busy) {
+                    e.preventDefault();
+                    void stopGeneration();
+                  } else if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    void submit();
+                  }
+                }}
+                placeholder="Message NexaDesk…"
+                rows={2}
+                maxLength={4000}
+                aria-label="Message NexaDesk"
+                disabled={messagesLoading}
+              />
+              <div className="composer-footer">
+                <div className="composer-hints"><button type="button" className="attach-control unavailable-control" disabled title="File attachments are coming soon" aria-label="Attach files (coming soon)"><Plus size={15}/> Attach</button><span className="hint-divider"/><span><LockKeyhole size={13}/> Saved to workspace</span></div>
+                <div className="send-side">
+                  <small>{input.length}/4000</small>
+                  {busy
+                    ? <button className="stop-button" type="button" onClick={() => void stopGeneration()} aria-label="Stop generating">
+                        <X size={15}/><span>{stopPending ? "Stopping…" : "Stop"}</span>
+                      </button>
+                    : <button className="send-button" type="submit" disabled={!input.trim() || messagesLoading} aria-label="Send message"><ArrowUp size={18}/></button>}
+                </div>
+              </div>
+            </form>
+            {chatError && <div className="chat-error" role="alert">{chatError}</div>}
+          </div>
+        </section>}
     </main>
     {pendingDelete && <div className="dialog-scrim" role="presentation">
       <section className="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title" aria-describedby="delete-description">
