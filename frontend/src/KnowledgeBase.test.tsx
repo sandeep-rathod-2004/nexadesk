@@ -43,7 +43,16 @@ describe("Knowledge Base UI", () => {
 
   it("uploads a document and shows its processing result", async () => {
     const user = userEvent.setup();
-    render(<KnowledgeBase token="secret-token" workspaceId="workspace-1" onUnauthorized={vi.fn()}/>);
+    const onDocumentsChange = vi.fn();
+    render(<KnowledgeBase
+      token="secret-token"
+      workspaceId="workspace-1"
+      onUnauthorized={vi.fn()}
+      documents={[]}
+      documentsLoading={false}
+      documentsError=""
+      onDocumentsChange={onDocumentsChange}
+    />);
     const file = new File(["Travel reimbursement details"], "travel-policy.txt", {
       type: "text/plain"
     });
@@ -59,12 +68,21 @@ describe("Knowledge Base UI", () => {
       expect.any(Function)
     );
     expect(screen.getByText("ready")).toBeTruthy();
+    expect(onDocumentsChange).toHaveBeenCalledWith("workspace-1", [document]);
   });
 
   it("confirms document deletion before calling the API", async () => {
-    api.listKnowledgeDocuments.mockResolvedValue([document]);
     const user = userEvent.setup();
-    render(<KnowledgeBase token="secret-token" workspaceId="workspace-1" onUnauthorized={vi.fn()}/>);
+    const onDocumentsChange = vi.fn();
+    render(<KnowledgeBase
+      token="secret-token"
+      workspaceId="workspace-1"
+      onUnauthorized={vi.fn()}
+      documents={[document]}
+      documentsLoading={false}
+      documentsError=""
+      onDocumentsChange={onDocumentsChange}
+    />);
 
     await user.click(await screen.findByRole("button", { name: "Delete travel-policy.txt" }));
     expect(screen.getByRole("alertdialog")).toBeTruthy();
@@ -79,11 +97,19 @@ describe("Knowledge Base UI", () => {
       "doc-1"
     ));
     expect(screen.queryByText("travel-policy.txt")).toBeNull();
+    expect(onDocumentsChange).toHaveBeenCalledWith("workspace-1", []);
   });
 
   it("shows empty and error states", async () => {
-    api.listKnowledgeDocuments.mockRejectedValue(new Error("Could not reach service."));
-    render(<KnowledgeBase token="secret-token" workspaceId="workspace-1" onUnauthorized={vi.fn()}/>);
+    render(<KnowledgeBase
+      token="secret-token"
+      workspaceId="workspace-1"
+      onUnauthorized={vi.fn()}
+      documents={[]}
+      documentsLoading={false}
+      documentsError="Could not reach service."
+      onDocumentsChange={vi.fn()}
+    />);
 
     expect(await screen.findByRole("alert")).toBeTruthy();
     expect(screen.queryByText("No documents yet")).toBeNull();

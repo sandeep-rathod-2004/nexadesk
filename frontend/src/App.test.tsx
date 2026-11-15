@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthResult } from "./lib/api";
@@ -33,7 +33,10 @@ vi.mock("./lib/api", () => api);
 
 import App from "./App";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 const access = {
   access_token: "in-memory-token",
@@ -69,6 +72,7 @@ describe("conversation management UI", () => {
     api.refreshSession.mockRejectedValue(new api.ApiError("No session", 401));
     api.logout.mockResolvedValue(undefined);
     api.listConversations.mockResolvedValue([]);
+    api.listKnowledgeDocuments.mockResolvedValue([]);
     api.getMessages.mockResolvedValue([]);
     api.getModel.mockResolvedValue({ provider: "Ollama", model: "phi3:mini" });
     api.createConversation.mockResolvedValue(firstConversation);
@@ -183,6 +187,88 @@ describe("conversation management UI", () => {
     expect(api.getModel).toHaveBeenCalledWith("in-memory-token");
   }, 10000);
 
+  it("uses the configured Gemini provider in the dashboard and processing notice", async () => {
+    api.getModel.mockResolvedValue({
+      provider: "Gemini",
+      model: "gemini-2.0-flash"
+    });
+    await signIn();
+
+    expect(await screen.findByText("Messages are processed by your configured Gemini provider.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Configured AI model" }).textContent)
+      .toContain("Gemini · gemini-2.0-flash");
+  });
+
+  it("shows provider information as unavailable when the model endpoint fails", async () => {
+    api.getModel.mockRejectedValue(new Error("Service unavailable"));
+    await signIn();
+
+    expect(await screen.findByText("AI provider information is currently unavailable.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Configured AI model" }).textContent)
+      .toContain("AI provider unavailable");
+  });
+
+  it("derives Getting Started progress from the workspace and ready documents", async () => {
+    api.listKnowledgeDocuments.mockResolvedValue([{
+      id: "doc-1",
+      workspace_id: "workspace-1",
+      filename: "guide.txt",
+      media_type: "text/plain",
+      size_bytes: 20,
+      status: "ready",
+      error_message: null,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z"
+    }]);
+    await signIn();
+
+    const progress = await screen.findByRole("progressbar", {
+      name: "Getting started progress"
+    });
+    await waitFor(() => expect(progress.getAttribute("aria-valuenow")).toBe("2"));
+    expect(screen.getByText("2 of 4")).toBeTruthy();
+    expect(screen.getByText("Coming soon · no saved customization is available")).toBeTruthy();
+    expect(screen.getByText("Coming soon · installation is not available")).toBeTruthy();
+    expect(api.listKnowledgeDocuments).toHaveBeenCalledWith(
+      "in-memory-token",
+      "workspace-1"
+    );
+  });
+
+  it("updates the greeting from local time while the dashboard stays open", async () => {
+    let localHour = 11;
+    let updateGreeting: (() => void) | undefined;
+    const hourSpy = vi.spyOn(Date.prototype, "getHours")
+      .mockImplementation(() => localHour);
+    const intervalSpy = vi.spyOn(window, "setInterval")
+      .mockImplementation((handler, delay) => {
+        if (delay === 60_000 && typeof handler === "function") {
+          updateGreeting = () => handler();
+        }
+        return 0;
+      });
+
+    try {
+      await signIn();
+      expect(screen.getByRole("heading", { name: /Good morning\./ })).toBeTruthy();
+
+      localHour = 12;
+      act(() => updateGreeting?.());
+      expect(screen.getByRole("heading", { name: /Good afternoon\./ })).toBeTruthy();
+
+      localHour = 17;
+      act(() => updateGreeting?.());
+      expect(screen.getByRole("heading", { name: /Good evening\./ })).toBeTruthy();
+
+      localHour = 4;
+      act(() => updateGreeting?.());
+      expect(screen.getByRole("heading", { name: /Good evening\./ })).toBeTruthy();
+    } finally {
+      hourSpy.mockRestore();
+      intervalSpy.mockRestore();
+    }
+  });
+
   it("creates conversations, loads history, renames and confirms deletion", async () => {
     const user = await signIn();
     await user.click(screen.getByRole("button", { name: /New conversation/ }));
@@ -274,6 +360,8 @@ describe("conversation management UI", () => {
       expect.any(Function)
     );
     expect(await screen.findByText("Saved response")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Configured AI model" }).textContent)
+      .toContain("Ollama · phi3:mini");
   });
 
   it("streams tokens progressively and marks stopped output as interrupted", async () => {

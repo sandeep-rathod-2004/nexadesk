@@ -1,12 +1,14 @@
 import { FormEvent, lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
-  Activity, ArrowUp, Bot, BookOpen, ChevronDown, CircleHelp, Command,
+  ArrowUp, Bot, BookOpen, ChevronDown, CircleHelp,
   Check, FileText, LifeBuoy, LockKeyhole, Menu, MessageSquare, MoreHorizontal,
-  Pencil, Plus, Settings2, ShieldCheck, Sparkles, ThumbsDown, ThumbsUp, Trash2, X, Zap
+  Pencil, Plus, Settings2, ShieldCheck, Sparkles, ThumbsDown, ThumbsUp, Trash2, X, Zap,
+  LogOut
 } from "lucide-react";
 import {
   ApiError, AuthResult, Conversation, createConversation, deleteConversation,
-  cancelChat, getMessages, getModel, listConversations, logout, ModelInfo, PersistedMessage,
+  cancelChat, getMessages, getModel, KnowledgeDocument, listConversations,
+  listKnowledgeDocuments, logout, ModelInfo, PersistedMessage,
   refreshSession, setAccessToken,
   renameConversation, SourceReference, StreamMilestone, streamChat
 } from "./lib/api";
@@ -33,6 +35,12 @@ const prompts = [
   { icon: FileText, title: "Draft a customer response", detail: "Clear, helpful and on-brand" },
   { icon: Sparkles, title: "Brainstorm new ideas", detail: "Explore possibilities together" }
 ];
+
+function greetingForHour(hour: number): string {
+  if (hour >= 5 && hour < 12) return "Good morning";
+  if (hour >= 12 && hour < 17) return "Good afternoon";
+  return "Good evening";
+}
 
 function authPageFromPath(pathname: string): AuthPageRoute {
   if (pathname === "/register") return "register";
@@ -63,6 +71,7 @@ export default function App() {
   const [authRestoring, setAuthRestoring] = useState(true);
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [modelInfoUnavailable, setModelInfoUnavailable] = useState(false);
+  const [greeting, setGreeting] = useState(() => greetingForHour(new Date().getHours()));
   const [authPage, setAuthPage] = useState<AuthPageRoute>(() => authPageFromPath(window.location.pathname));
   const [workspaceId, setWorkspaceId] = useState("");
   const [authError, setAuthError] = useState("");
@@ -70,6 +79,9 @@ export default function App() {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [conversationsLoading, setConversationsLoading] = useState(false);
+  const [knowledgeDocuments, setKnowledgeDocuments] = useState<KnowledgeDocument[]>([]);
+  const [knowledgeLoading, setKnowledgeLoading] = useState(false);
+  const [knowledgeError, setKnowledgeError] = useState("");
   const [messagesLoading, setMessagesLoading] = useState(false);
   const [conversationBusy, setConversationBusy] = useState(false);
   const [conversationError, setConversationError] = useState("");
@@ -81,6 +93,8 @@ export default function App() {
   const activeChatRequest = useRef<AbortController | null>(null);
   const activeRequestId = useRef<string | null>(null);
   const stopRequested = useRef(false);
+  const currentWorkspaceId = useRef(workspaceId);
+  currentWorkspaceId.current = workspaceId;
   const [stopPending, setStopPending] = useState(false);
   const retryableRequest = useRef<{
     message: string;
@@ -97,6 +111,16 @@ export default function App() {
     const handlePopState = () => setAuthPage(authPageFromPath(window.location.pathname));
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    const updateGreeting = () => setGreeting(greetingForHour(new Date().getHours()));
+    const intervalId = window.setInterval(updateGreeting, 60_000);
+    window.addEventListener("focus", updateGreeting);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", updateGreeting);
+    };
   }, []);
 
   useEffect(() => {
@@ -142,7 +166,15 @@ export default function App() {
     setModelInfoUnavailable(false);
     void getModel(auth.access_token)
       .then(info => {
-        if (active) setModelInfo(info);
+        if (!active) return;
+        if (
+          typeof info.provider !== "string" || !info.provider.trim() ||
+          typeof info.model !== "string" || !info.model.trim()
+        ) {
+          setModelInfoUnavailable(true);
+          return;
+        }
+        setModelInfo(info);
       })
       .catch(error => {
         if (error instanceof ApiError && error.status === 401) {
@@ -153,6 +185,38 @@ export default function App() {
       });
     return () => { active = false; };
   }, [auth]);
+
+  useEffect(() => {
+    if (!auth || !workspaceId) {
+      setKnowledgeDocuments([]);
+      setKnowledgeLoading(false);
+      setKnowledgeError("");
+      return;
+    }
+    let active = true;
+    setKnowledgeDocuments([]);
+    setKnowledgeLoading(true);
+    setKnowledgeError("");
+    void listKnowledgeDocuments(auth.access_token, workspaceId)
+      .then(documents => {
+        if (active) setKnowledgeDocuments(documents);
+      })
+      .catch(error => {
+        if (!active) return;
+        if (error instanceof ApiError && error.status === 401) {
+          expireSession(error);
+          return;
+        }
+        setKnowledgeDocuments([]);
+        setKnowledgeError(
+          error instanceof Error ? error.message : "Could not load workspace knowledge."
+        );
+      })
+      .finally(() => {
+        if (active) setKnowledgeLoading(false);
+      });
+    return () => { active = false; };
+  }, [auth, workspaceId]);
 
   function expireSession(error: ApiError) {
     activeChatRequest.current?.abort();
@@ -165,6 +229,9 @@ export default function App() {
     setWorkspaceId("");
     setConversations([]);
     setConversationsLoading(false);
+    setKnowledgeDocuments([]);
+    setKnowledgeLoading(false);
+    setKnowledgeError("");
     setPendingDelete(null);
     clearCurrentConversation();
     setAuthError(error.message);
@@ -562,7 +629,6 @@ export default function App() {
           });
         return;
       }
-      setModelInfo({ provider: "Ollama", model: result.model });
       setConversationId(result.conversation_id);
       window.sessionStorage.setItem(
         conversationStorageKey(auth.user.id, workspaceId),
@@ -632,6 +698,23 @@ export default function App() {
     }
   }
 
+  const activeWorkspace = auth?.workspaces.find(item => item.id === workspaceId);
+  const workspaceCreated = Boolean(activeWorkspace);
+  const knowledgeConnected = knowledgeDocuments.some(document => document.status === "ready");
+  const completedSteps = Number(workspaceCreated) + Number(knowledgeConnected);
+  const progressPercent = (completedSteps / 4) * 100;
+  const modelLabel = modelInfo
+    ? `${modelInfo.provider} · ${modelInfo.model}`
+    : modelInfoUnavailable
+      ? "AI provider unavailable"
+      : "Loading AI provider…";
+  const modelProvider = modelInfo?.provider.toLowerCase();
+  const providerProcessingMessage = modelProvider?.includes("gemini")
+    ? "Messages are processed by your configured Gemini provider."
+    : modelProvider?.includes("ollama")
+      ? "Messages are processed by your configured local Ollama runtime."
+      : "AI provider information is currently unavailable.";
+
   if (authRestoring) {
     return <main className="auth-page"><section className="auth-card" role="status">
       <div className="brand-row auth-brand"><div className="brand-mark"><Sparkles size={19}/></div><span className="brand-name">nexa<span>desk</span></span></div>
@@ -651,13 +734,16 @@ export default function App() {
   return <div className="app-shell">
     <aside className={`sidebar ${mobileNav ? "sidebar-open" : ""}`}>
       <div className="brand-row"><div className="brand-mark"><Sparkles size={19}/></div><span className="brand-name">nexa<span>desk</span></span><button className="icon-button mobile-close" onClick={() => setMobileNav(false)} aria-label="Close menu"><X size={18}/></button></div>
-      <label className="workspace-switch"><div className="workspace-avatar">N</div><div className="workspace-copy"><strong>{auth.workspaces.find(item => item.id === workspaceId)?.name ?? "Workspace"}</strong><small>{auth.user.email}</small></div><select aria-label="Select workspace" value={workspaceId} onChange={event => {
+      <label className="workspace-switch"><div className="workspace-avatar">N</div><div className="workspace-copy"><strong>{auth.workspaces.find(item => item.id === workspaceId)?.name ?? "Workspace"}</strong><small>{auth.user.email}</small></div><ChevronDown size={15} aria-hidden="true"/><select aria-label="Select workspace" value={workspaceId} onChange={event => {
         const selectedId = event.target.value;
         setWorkspaceId(selectedId);
+        setKnowledgeDocuments([]);
+        setKnowledgeLoading(Boolean(selectedId));
+        setKnowledgeError("");
         window.sessionStorage.setItem(`nexadesk.workspace.${auth.user.id}`, selectedId);
         clearCurrentConversation();
       }} disabled={busy || conversationBusy}>{auth.workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select></label>
-      <button className="new-chat" onClick={() => void startNewConversation()} disabled={!workspaceId || conversationBusy || busy}><Plus size={17}/> New conversation <span>⌘ K</span></button>
+      <button className="new-chat" onClick={() => void startNewConversation()} disabled={!workspaceId || conversationBusy || busy}><Plus size={17}/> New conversation</button>
       <div className="nav-label">WORKSPACE</div>
       <nav className="nav-list">
         <button className={`nav-item ${activeView === "conversations" ? "active" : ""}`} onClick={() => {
@@ -668,8 +754,8 @@ export default function App() {
           selectView("knowledge");
           setMobileNav(false);
         }}><BookOpen size={17}/> Knowledge base</button>
-        <a className="nav-item" href="#analytics"><Activity size={17}/> Analytics</a>
-        <a className="nav-item" href="#integrations"><Command size={17}/> Integrations</a>
+        <button className="nav-item unavailable-control" type="button" disabled title="Analytics is coming soon" aria-label="Analytics (coming soon)"><MessageSquare size={17}/> Analytics <span className="coming-soon-label">Coming soon</span></button>
+        <button className="nav-item unavailable-control" type="button" disabled title="Integrations are coming soon" aria-label="Integrations (coming soon)"><Zap size={17}/> Integrations <span className="coming-soon-label">Coming soon</span></button>
       </nav>
       <div className="nav-label recent-label">RECENT</div>
       <div className="recent-list" aria-label="Conversation history">
@@ -699,26 +785,34 @@ export default function App() {
       </div>
       {conversationError && <p className="conversation-error" role="alert">{conversationError}</p>}
       <div className="sidebar-bottom">
-        <div className="usage-card"><div className="usage-top"><span>Your role</span><span>{auth.workspaces.find(item => item.id === workspaceId)?.role ?? "Member"}</span></div><div className="usage-track"><span/></div><small>Conversations are saved to this workspace</small></div>
-        <button className="nav-item"><Settings2 size={17}/> Settings</button>
-        <button className="profile-row" onClick={signOut}><div className="profile-avatar">{auth.user.email.slice(0, 2).toUpperCase()}</div><div className="profile-copy"><strong>{auth.user.email}</strong><small>Sign out</small></div><MoreHorizontal size={18} className="muted"/></button>
+        <div className="usage-card"><div className="usage-top"><span>Your role</span><span>{activeWorkspace?.role ?? "Unavailable"}</span></div><small>Conversations are saved to this workspace</small></div>
+        <button className="nav-item unavailable-control" type="button" disabled title="Settings are coming soon" aria-label="Settings (coming soon)"><Settings2 size={17}/> Settings <span className="coming-soon-label">Coming soon</span></button>
+        <button className="profile-row" onClick={signOut}><div className="profile-avatar">{auth.user.email.slice(0, 2).toUpperCase()}</div><div className="profile-copy"><strong>{auth.user.email}</strong><small>Sign out</small></div><LogOut size={17} className="muted"/></button>
       </div>
     </aside>
     {mobileNav && <button className="mobile-scrim" onClick={() => setMobileNav(false)} aria-label="Close navigation"/>}
     <main className="main-panel">
       <header className="topbar">
         <div className="topbar-left"><button className="icon-button mobile-menu" onClick={() => setMobileNav(true)} aria-label="Open menu"><Menu size={19}/></button><div className="breadcrumb">Workspace <span>/</span> <strong>{activeView === "knowledge" ? "Knowledge base" : "Conversations"}</strong></div></div>
-        <div className="topbar-actions"><div className="status-pill"><span/> Ollama</div><button className="icon-button" aria-label="Help"><CircleHelp size={18}/></button><button className="icon-button" aria-label="More options"><MoreHorizontal size={19}/></button></div>
+        <div className="topbar-actions"><div className={`status-pill ${modelInfo ? "provider-ready" : "provider-unavailable"}`} aria-live="polite"><span aria-hidden="true"/>{modelInfo?.provider ?? (modelInfoUnavailable ? "Provider unavailable" : "Loading provider…")}</div><button className="icon-button unavailable-control" type="button" disabled title="Help is coming soon" aria-label="Help (coming soon)"><CircleHelp size={18}/></button><button className="icon-button unavailable-control" type="button" disabled title="More options are coming soon" aria-label="More options (coming soon)"><MoreHorizontal size={19}/></button></div>
       </header>
       {activeView === "knowledge"
         ? <KnowledgeBase
             token={auth.access_token}
             workspaceId={workspaceId}
             onUnauthorized={expireSession}
+            documents={knowledgeDocuments}
+            documentsLoading={knowledgeLoading}
+            documentsError={knowledgeError}
+            onDocumentsChange={(sourceWorkspaceId, documents) => {
+              if (sourceWorkspaceId !== currentWorkspaceId.current) return;
+              setKnowledgeDocuments(documents);
+              setKnowledgeError("");
+            }}
           />
         : <section className="chat-layout" id="chat">
         <div className="chat-column">
-          <div className="chat-heading"><div><div className="eyebrow"><span className="eyebrow-line"/> YOUR AI WORKSPACE</div><h1>Good morning. <span>Let’s make progress.</span></h1><p>A thoughtful assistant for the work that matters.</p></div><button className="model-selector" aria-label="Configured AI model"><span className="model-orb"><Bot size={15}/></span> {modelInfo ? `${modelInfo.provider} · ${modelInfo.model}` : modelInfoUnavailable ? "Ollama · unavailable" : "Ollama · loading"} <ChevronDown size={14}/></button></div>
+          <div className="chat-heading"><div><div className="eyebrow"><span className="eyebrow-line"/> YOUR AI WORKSPACE</div><h1>{greeting}. <span>Let’s make progress.</span></h1><p>A thoughtful assistant for the work that matters.</p></div><button className="model-selector unavailable-control" type="button" disabled title="Model selection is not available" aria-label="Configured AI model"><span className="model-orb"><Bot size={15}/></span> {modelLabel}</button></div>
           <div className="conversation"><div className="date-divider"><span/> TODAY <span/></div>
             {messagesLoading
               ? <p className="history-state" role="status">Loading conversation…</p>
@@ -745,8 +839,8 @@ export default function App() {
                     </details>)}
                   </div>}
                   {m.role === "assistant" && m.id !== "welcome" && <div className="message-tools">
-                    <button aria-label="Helpful"><ThumbsUp size={14}/></button>
-                    <button aria-label="Not helpful"><ThumbsDown size={14}/></button>
+                    <button type="button" disabled title="Message feedback is coming soon" aria-label="Helpful (coming soon)"><ThumbsUp size={14}/></button>
+                    <button type="button" disabled title="Message feedback is coming soon" aria-label="Not helpful (coming soon)"><ThumbsDown size={14}/></button>
                   </div>}
                 </div>
               </article>)}
@@ -773,7 +867,7 @@ export default function App() {
               disabled={messagesLoading}
             />
             <div className="composer-footer">
-              <div className="composer-hints"><span><Plus size={15}/> Attach</span><span className="hint-divider"/><span><LockKeyhole size={13}/> Saved to workspace</span></div>
+              <div className="composer-hints"><button type="button" className="attach-control unavailable-control" disabled title="File attachments are coming soon" aria-label="Attach files (coming soon)"><Plus size={15}/> Attach</button><span className="hint-divider"/><span><LockKeyhole size={13}/> Saved to workspace</span></div>
               <div className="send-side">
                 <small>{input.length}/4000</small>
                 {busy
@@ -788,10 +882,15 @@ export default function App() {
           <div className="disclaimer"><ShieldCheck size={13}/> AI can make mistakes. Verify important information before acting.</div>
         </div>
         <aside className="right-rail">
-          <div className="rail-card welcome-card"><div className="rail-card-top"><span className="mini-icon purple"><Zap size={15}/></span><span className="rail-kicker">QUICK OVERVIEW</span><MoreHorizontal size={17}/></div><h3>Your workspace,<br/>at a glance.</h3><p>Your local AI environment is ready to explore.</p><div className="overview-stats"><div><strong>01</strong><small>Assistant</small></div><div><strong>Local</strong><small>Runtime</small></div></div></div>
-          <div className="rail-card"><div className="rail-title"><span>GETTING STARTED</span><span className="completion">1 of 4</span></div><div className="check-progress"><span/></div><div className="checklist"><div className="check-row done"><span className="check-circle">✓</span><span><strong>Workspace created</strong><small>Your environment is set up</small></span></div><div className="check-row"><span className="check-circle"/><span><strong>Connect knowledge</strong><small>Add trusted source material</small></span></div><div className="check-row"><span className="check-circle"/><span><strong>Customize assistant</strong><small>Make it yours</small></span></div><div className="check-row"><span className="check-circle"/><span><strong>Install on your site</strong><small>Meet your customers</small></span></div></div></div>
-          <div className="rail-card security-card"><div className="security-icon"><ShieldCheck size={17}/></div><div><strong>Built with privacy in mind</strong><p>Local-first development. Messages are sent to the model running on your machine.</p><a href="#security">Explore security approach <ArrowUp size={12}/></a></div></div>
-          <div className="rail-footer"><span><LifeBuoy size={13}/> Help center</span><span>v0.1.0 · Preview</span></div>
+          <div className="rail-card welcome-card"><div className="rail-card-top"><span className="mini-icon purple"><Zap size={15}/></span><span className="rail-kicker">WORKSPACE OVERVIEW</span></div><h3>{activeWorkspace?.name ?? "Workspace"}</h3><p>Conversations and knowledge for this workspace.</p><div className="overview-stats"><div><strong>{conversations.length}</strong><small>Conversations</small></div><div><strong>{knowledgeLoading ? "…" : knowledgeError ? "—" : knowledgeDocuments.length}</strong><small>Documents</small></div></div></div>
+          <div className="rail-card"><div className="rail-title"><span>GETTING STARTED</span><span className="completion">{knowledgeLoading ? "Loading…" : `${completedSteps} of 4`}</span></div><div className="check-progress" role="progressbar" aria-label="Getting started progress" aria-valuemin={0} aria-valuemax={4} aria-valuenow={completedSteps} aria-valuetext={`${completedSteps} of 4 steps complete`}><span style={{ width: `${progressPercent}%` }}/></div><div className="checklist">
+            <div className={`check-row ${workspaceCreated ? "done" : ""}`}><span className="check-circle">{workspaceCreated ? <Check size={11}/> : null}</span><span><strong>Workspace created</strong><small>{workspaceCreated ? "Workspace available" : "Create or join a workspace"}</small></span></div>
+            <div className={`check-row ${knowledgeConnected ? "done" : ""}`}><span className="check-circle">{knowledgeConnected ? <Check size={11}/> : null}</span><span><strong>Connect knowledge</strong><small>{knowledgeLoading ? "Checking workspace sources…" : knowledgeError ? "Knowledge status unavailable" : knowledgeConnected ? "A document is ready" : knowledgeDocuments.some(document => document.status === "processing") ? "Documents are processing" : "Add a ready source document"}</small></span></div>
+            <div className="check-row unavailable-step"><span className="check-circle"/><span><strong>Customize assistant</strong><small>Coming soon · no saved customization is available</small></span></div>
+            <div className="check-row unavailable-step"><span className="check-circle"/><span><strong>Install on your site</strong><small>Coming soon · installation is not available</small></span></div>
+          </div></div>
+          <div className="rail-card security-card"><div className="security-icon"><ShieldCheck size={17}/></div><div><strong>AI provider &amp; processing</strong><p>{providerProcessingMessage}</p></div></div>
+          <div className="rail-footer"><button className="help-center-control unavailable-control" type="button" disabled title="Help center is coming soon"><LifeBuoy size={13}/> Help center <span className="sr-only">(coming soon)</span></button><span>v0.1.0 · Preview</span></div>
         </aside>
       </section>}
     </main>

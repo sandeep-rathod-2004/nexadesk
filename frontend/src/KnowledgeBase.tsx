@@ -4,7 +4,6 @@ import {
   ApiError,
   deleteKnowledgeDocument,
   KnowledgeDocument,
-  listKnowledgeDocuments,
   uploadKnowledgeDocument
 } from "./lib/api";
 
@@ -12,6 +11,10 @@ type Props = {
   token: string;
   workspaceId: string;
   onUnauthorized: (error: ApiError) => void;
+  documents: KnowledgeDocument[];
+  documentsLoading: boolean;
+  documentsError: string;
+  onDocumentsChange: (workspaceId: string, documents: KnowledgeDocument[]) => void;
 };
 
 function formatSize(bytes: number): string {
@@ -20,10 +23,17 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export default function KnowledgeBase({ token, workspaceId, onUnauthorized }: Props) {
+export default function KnowledgeBase({
+  token,
+  workspaceId,
+  onUnauthorized,
+  documents,
+  documentsLoading,
+  documentsError,
+  onDocumentsChange
+}: Props) {
   const documentInput = useRef<HTMLInputElement>(null);
-  const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [visibleDocuments, setVisibleDocuments] = useState(documents);
   const [error, setError] = useState("");
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -34,25 +44,8 @@ export default function KnowledgeBase({ token, workspaceId, onUnauthorized }: Pr
   unauthorizedHandler.current = onUnauthorized;
 
   useEffect(() => {
-    let active = true;
-    setLoading(true);
-    setError("");
-    void listKnowledgeDocuments(token, workspaceId)
-      .then(items => {
-        if (active) setDocuments(items);
-      })
-      .catch(reason => {
-        if (!active) return;
-        if (reason instanceof ApiError && reason.status === 401) {
-          unauthorizedHandler.current(reason);
-        }
-        setError(reason instanceof Error ? reason.message : "Could not load documents.");
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => { active = false; };
-  }, [token, workspaceId]);
+    setVisibleDocuments(documents);
+  }, [documents]);
 
   function chooseFile(event: ChangeEvent<HTMLInputElement>) {
     setSelectedFile(event.target.files?.[0] ?? null);
@@ -72,7 +65,12 @@ export default function KnowledgeBase({ token, workspaceId, onUnauthorized }: Pr
         selectedFile,
         setUploadProgress
       );
-      setDocuments(current => [document, ...current.filter(item => item.id !== document.id)]);
+      const updatedDocuments = [
+        document,
+        ...visibleDocuments.filter(item => item.id !== document.id)
+      ];
+      setVisibleDocuments(updatedDocuments);
+      onDocumentsChange(workspaceId, updatedDocuments);
       setSelectedFile(null);
       const input = documentInput.current;
       if (input) input.value = "";
@@ -96,7 +94,9 @@ export default function KnowledgeBase({ token, workspaceId, onUnauthorized }: Pr
     setError("");
     try {
       await deleteKnowledgeDocument(token, workspaceId, pendingDelete.id);
-      setDocuments(current => current.filter(item => item.id !== pendingDelete.id));
+      const updatedDocuments = visibleDocuments.filter(item => item.id !== pendingDelete.id);
+      setVisibleDocuments(updatedDocuments);
+      onDocumentsChange(workspaceId, updatedDocuments);
       setPendingDelete(null);
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 401) {
@@ -147,17 +147,17 @@ export default function KnowledgeBase({ token, workspaceId, onUnauthorized }: Pr
       </div>}
     </form>
 
-    {error && <div className="knowledge-error" role="alert"><AlertCircle size={15}/>{error}</div>}
+    {(documentsError || error) && <div className="knowledge-error" role="alert"><AlertCircle size={15}/>{error || documentsError}</div>}
 
     <div className="document-section">
       <div className="document-section-title"><h2>Documents</h2><span>Private to this workspace</span></div>
-      {loading && <p className="knowledge-state" role="status">Loading documents…</p>}
-      {!loading && documents.length === 0 && !error && <div className="knowledge-empty">
+      {documentsLoading && <p className="knowledge-state" role="status">Loading documents…</p>}
+      {!documentsLoading && visibleDocuments.length === 0 && !documentsError && !error && <div className="knowledge-empty">
         <span><BookOpen size={21}/></span><strong>No documents yet</strong>
         <p>Upload a PDF, DOCX, or TXT file to ground answers in your own knowledge.</p>
       </div>}
-      {!loading && documents.length > 0 && <div className="document-list">
-        {documents.map(document => <article className="document-row" key={document.id}>
+      {!documentsLoading && visibleDocuments.length > 0 && <div className="document-list">
+        {visibleDocuments.map(document => <article className="document-row" key={document.id}>
           <span className="document-icon"><FileText size={17}/></span>
           <div className="document-details">
             <strong>{document.filename}</strong>
