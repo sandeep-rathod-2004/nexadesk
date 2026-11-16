@@ -189,14 +189,7 @@ describe("conversation management UI", () => {
     });
   });
 
-  it("shows the permanent welcome dashboard and submits a suggestion through streaming", async () => {
-    api.streamChat.mockResolvedValue({
-      reply: "A useful explanation.",
-      model: "phi3:mini",
-      conversation_id: "conversation-1",
-      grounded: false,
-      sources: []
-    });
+  it("shows the welcome dashboard with Normal Conversation selected by default", async () => {
     const user = await signIn(userEvent.setup(), false);
 
     expect(screen.getByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
@@ -205,22 +198,73 @@ describe("conversation management UI", () => {
     )).toBeTruthy();
     expect(screen.queryByText(/Good morning|Good afternoon|Good evening/)).toBeNull();
     expect(screen.queryByText(/Hey there! I’m NexaDesk/)).toBeNull();
-    expect(document.querySelectorAll(".prompt-card")).toHaveLength(3);
+    expect(screen.queryByText("Explain a complex topic")).toBeNull();
+    expect(screen.getByRole("button", { name: /Normal Conversation/ }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: /Knowledge Base/ }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("button", { name: "Start Chat" })).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "Message NexaDesk" })).toBeTruthy();
 
-    await user.click(screen.getByRole("button", { name: "Help me write something" }));
+    await user.click(screen.getByRole("button", { name: "Start Chat" }));
+    await waitFor(() => expect(api.createConversation).toHaveBeenCalledTimes(1));
+    expect(api.createConversation).toHaveBeenCalledWith("in-memory-token", "workspace-1");
+    expect(screen.getByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Start Chat" })).toBeNull();
+  });
 
-    await waitFor(() => expect(api.streamChat).toHaveBeenCalledWith(
-      "Help me write something",
+  it("changes the selected chat mode and opens document selection for Knowledge Base", async () => {
+    const user = await signIn(userEvent.setup(), false);
+    const knowledgeMode = screen.getByRole("button", { name: /Knowledge Base/ });
+
+    await user.click(knowledgeMode);
+
+    expect(knowledgeMode.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: /Normal Conversation/ }).getAttribute("aria-pressed")).toBe("false");
+    await user.click(screen.getByRole("button", { name: "Start Chat" }));
+
+    expect(await screen.findByRole("dialog", { name: "Create a Knowledge Chat" })).toBeTruthy();
+    expect(api.createConversation).not.toHaveBeenCalled();
+  });
+
+  it("creates a Knowledge Chat only after selecting a ready document", async () => {
+    api.listKnowledgeDocuments.mockResolvedValue([{
+      id: "document-1",
+      workspace_id: "workspace-1",
+      filename: "policy.pdf",
+      media_type: "application/pdf",
+      size_bytes: 100,
+      status: "ready",
+      error_message: null,
+      created_at: "2026-01-01T00:00:00Z",
+      updated_at: "2026-01-01T00:00:00Z"
+    }]);
+    const user = await signIn(userEvent.setup(), false);
+
+    await user.click(screen.getByRole("button", { name: /Knowledge Base/ }));
+    await user.click(screen.getByRole("button", { name: "Start Chat" }));
+    await user.click(await screen.findByLabelText("policy.pdf"));
+    const createKnowledgeChat = screen.getByRole("button", { name: "Create Knowledge Chat" });
+    fireEvent.click(createKnowledgeChat);
+    fireEvent.click(createKnowledgeChat);
+
+    await waitFor(() => expect(api.createConversation).toHaveBeenCalledWith(
       "in-memory-token",
       "workspace-1",
-      null,
-      expect.any(String),
-      expect.any(AbortSignal),
-      expect.any(Function),
-      expect.any(Function)
+      "New conversation",
+      "knowledge",
+      ["document-1"]
     ));
-    expect(await screen.findByText("A useful explanation.")).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "Welcome to NexaDesk" })).toBeNull();
+    expect(api.createConversation).toHaveBeenCalledTimes(1);
+  });
+
+  it("prevents duplicate Normal Chat creation on repeated Start Chat clicks", async () => {
+    const user = await signIn(userEvent.setup(), false);
+    const startButton = screen.getByRole("button", { name: "Start Chat" });
+
+    fireEvent.click(startButton);
+    fireEvent.click(startButton);
+
+    await waitFor(() => expect(api.createConversation).toHaveBeenCalledTimes(1));
+    expect(api.createConversation).toHaveBeenCalledWith("in-memory-token", "workspace-1");
   });
 
   it("opens and dismisses the mobile navigation drawer and first-use hint", async () => {

@@ -64,7 +64,7 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
         max_age=settings.jwt_refresh_token_days * 24 * 60 * 60,
         httponly=True,
         secure=settings.app_env == "production",
-        samesite="lax",
+        samesite="none" if settings.app_env == "production" else "lax",
         path=f"{settings.api_v1_prefix.rstrip('/')}/auth",
     )
 
@@ -75,7 +75,7 @@ def _clear_refresh_cookie(response: Response) -> None:
         key=_REFRESH_COOKIE,
         httponly=True,
         secure=settings.app_env == "production",
-        samesite="lax",
+        samesite="none" if settings.app_env == "production" else "lax",
         path=f"{settings.api_v1_prefix.rstrip('/')}/auth",
     )
 

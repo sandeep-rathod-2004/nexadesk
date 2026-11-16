@@ -128,8 +128,9 @@ async function fetchWithSession(
   let refreshed: AuthResult;
   try {
     refreshed = await refreshSession();
-  } catch {
-    return response;
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) return response;
+    throw error;
   }
   const retryHeaders: Record<string, string> = {};
   new Headers(init.headers).forEach((value, key) => {

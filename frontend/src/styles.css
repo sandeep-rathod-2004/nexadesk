@@ -299,11 +299,21 @@ body{height:100%;min-height:100%;overflow-x:hidden}
 .empty-state-icon{display:grid;place-items:center;width:58px;height:58px;margin-bottom:20px;border:1px solid #3b365c;border-radius:19px;background:linear-gradient(145deg,#30294f,#1d2037);color:#c4b6ff;box-shadow:0 10px 30px #0003}
 .empty-state h1{margin:0;color:#f1f1f8;font:700 clamp(25px,3.2vw,34px)/1.2 Manrope,sans-serif;letter-spacing:-.8px}
 .empty-subtitle{margin:10px 0 25px;color:#929bb1;font-size:14px;line-height:1.5}
-.prompt-grid{width:min(100%,680px);grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:0}
-.prompt-card{min-height:72px;align-items:center;padding:13px 15px;border-radius:12px;background:#141a2b;text-align:left}
-.prompt-card strong{margin:0;padding-right:10px;font-size:12px;line-height:1.4}
-.prompt-card .prompt-icon{flex:0 0 30px;width:30px;height:30px}
-.prompt-arrow{right:10px;top:10px}
+.chat-mode-grid{display:grid;width:min(100%,760px);grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin:0 0 20px}
+.chat-mode-card{position:relative;display:flex;align-items:center;gap:15px;min-height:124px;padding:22px;border:1px solid #30364c;border-radius:16px;background:#141a2b;color:#e8eaf4;text-align:left;transition:border-color .18s ease,background .18s ease,transform .18s ease}
+.chat-mode-card:hover{border-color:#6655bb;background:#191e34}
+.chat-mode-card.selected{border-color:#8169ec;background:#28213f;box-shadow:0 0 0 1px #8169ec55,0 12px 32px #0002}
+.chat-mode-card:focus-visible,.start-chat-button:focus-visible{outline:2px solid #aa98ff;outline-offset:3px}
+.chat-mode-icon{display:grid;place-items:center;flex:0 0 48px;width:48px;height:48px;border:1px solid #383353;border-radius:14px;background:#211e37;color:#bbaaff}
+.chat-mode-card.selected .chat-mode-icon{border-color:#6555a8;background:#39305d;color:#d4caff}
+.chat-mode-copy{display:grid;gap:7px;min-width:0}
+.chat-mode-copy strong{font-size:15px;line-height:1.35}
+.chat-mode-copy>span{color:#9ba3b8;font-size:12px;line-height:1.5}
+.chat-mode-indicator{display:grid;place-items:center;flex:0 0 22px;width:22px;height:22px;margin-left:auto;border:1px solid #4b5268;border-radius:50%;color:#fff}
+.chat-mode-card.selected .chat-mode-indicator{border-color:#927bff;background:#8068e8}
+.start-chat-button{min-width:160px;min-height:46px;margin:0 0 26px;padding:0 24px;border:1px solid #8972f2;border-radius:12px;background:#765ee0;color:white;font-size:14px;font-weight:700;box-shadow:0 8px 24px #6048ce3a;transition:background .18s ease,transform .18s ease}
+.start-chat-button:hover:not(:disabled){transform:translateY(-1px);background:#8872ef}
+.start-chat-button:disabled{opacity:.55;cursor:not-allowed}
 .message-row{width:100%;max-width:760px;margin:0 auto 27px;padding:4px 0}
 .message-content{max-width:720px;font-size:14px;line-height:1.75;color:#d1d5e2}
 .message-meta strong{font-size:12px}
@@ -343,11 +353,12 @@ body{height:100%;min-height:100%;overflow-x:hidden}
   .empty-state-icon{width:52px;height:52px;margin-bottom:17px;border-radius:17px}
   .empty-state h1{max-width:330px;font-size:27px}
   .empty-subtitle{margin:8px 0 20px;font-size:13px}
-  .prompt-grid{gap:7px}
-  .prompt-card{min-height:82px;flex-direction:column;justify-content:center;gap:7px;padding:10px 6px;border-radius:11px;text-align:center}
-  .prompt-card strong{padding:0;font-size:10px;line-height:1.3}
-  .prompt-card .prompt-icon{width:27px;height:27px;flex-basis:27px}
-  .prompt-arrow{display:none}
+  .chat-mode-grid{grid-template-columns:1fr;gap:10px;margin-bottom:16px}
+  .chat-mode-card{min-height:92px;padding:16px}
+  .chat-mode-icon{width:42px;height:42px;flex-basis:42px}
+  .chat-mode-copy strong{font-size:13px}
+  .chat-mode-copy>span{font-size:11px}
+  .start-chat-button{width:100%;margin-bottom:20px}
   .message-row{gap:10px;margin-bottom:22px}
   .message-content{font-size:13px}
   .composer{margin-top:8px;padding:11px 12px max(9px,env(safe-area-inset-bottom));border-radius:17px}
@@ -364,8 +375,6 @@ body{height:100%;min-height:100%;overflow-x:hidden}
   .chat-layout{padding-right:11px;padding-left:11px}
   .empty-state h1{font-size:25px}
   .empty-subtitle{font-size:12px}
-  .prompt-card{min-height:78px}
-  .prompt-card strong{font-size:9px}
   .composer-hints>span:last-child{font-size:8px}
 }
 

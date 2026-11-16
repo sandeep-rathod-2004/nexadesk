@@ -112,6 +112,18 @@ describe("conversation API client", () => {
       .toBe("Bearer rotated-access-token");
   });
 
+  it("preserves transient refresh failures instead of converting them to session expiry", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ detail: "expired" }), { status: 401 }))
+      .mockRejectedValueOnce(new TypeError("Network unavailable"));
+    vi.stubGlobal("fetch", fetchMock);
+    setAccessToken("expired-access-token");
+
+    await expect(getModel("expired-access-token"))
+      .rejects.toThrow("Network unavailable");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("parses streamed tokens and completion without putting credentials in the URL", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(
       [

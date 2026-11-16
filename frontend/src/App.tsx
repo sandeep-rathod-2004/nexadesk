@@ -27,11 +27,6 @@ type Message = {
   status?: "completed" | "interrupted" | "generating";
 };
 const initial: Message[] = [];
-const prompts = [
-  { icon: BookOpen, title: "Explain a complex topic" },
-  { icon: FileText, title: "Help me write something" },
-  { icon: Sparkles, title: "Brainstorm new ideas" }
-];
 const SESSION_RESTORE_TIMEOUT_MS = 10_000;
 
 function authPageFromPath(pathname: string): AuthPageRoute {
@@ -67,6 +62,7 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  const [selectedChatType, setSelectedChatType] = useState<"normal" | "knowledge">("normal");
   const [isMobileLayout, setIsMobileLayout] = useState(
     () => window.matchMedia?.("(max-width: 820px)").matches ?? window.innerWidth <= 820
   );
@@ -105,6 +101,8 @@ export default function App() {
   const [showAllNormalChats, setShowAllNormalChats] = useState(false);
   const [showAllKnowledgeChats, setShowAllKnowledgeChats] = useState(false);
   const sendInFlight = useRef(false);
+  const startConversationInFlight = useRef(false);
+  const saveDocumentsInFlight = useRef(false);
   const sidebarRef = useRef<HTMLElement>(null);
   const activeChatRequest = useRef<AbortController | null>(null);
   const activeRequestId = useRef<string | null>(null);
@@ -475,11 +473,15 @@ export default function App() {
     chatType: "normal" | "knowledge" = "normal",
     documentIds?: string[]
   ): Promise<boolean> {
-    if (!auth || !workspaceId || conversationBusy || busy) return false;
+    if (
+      !auth || !workspaceId || conversationBusy || busy ||
+      startConversationInFlight.current
+    ) return false;
     if (chatType === "knowledge" && documentIds === undefined) {
       openDocumentDialog();
       return true;
     }
+    startConversationInFlight.current = true;
     const requestId = ++conversationRequest.current;
     setMessagesLoading(false);
     setConversationBusy(true);
@@ -523,12 +525,16 @@ export default function App() {
       }
       return false;
     } finally {
+      startConversationInFlight.current = false;
       setConversationBusy(false);
     }
   }
 
   async function saveDocumentSelection() {
-    if (!auth || !documentDialog || documentSaveBusy) return;
+    if (
+      !auth || !documentDialog || documentSaveBusy ||
+      saveDocumentsInFlight.current
+    ) return;
     if (documentDialog.selectedDocumentIds.length === 0) {
       setDocumentDialog(current => current
         ? { ...current, error: "Select at least one ready document." }
@@ -536,22 +542,26 @@ export default function App() {
       );
       return;
     }
+    saveDocumentsInFlight.current = true;
+    setDocumentSaveBusy(true);
     if (documentDialog.conversationId === null) {
-      setDocumentSaveBusy(true);
-      const created = await startNewConversation(
-        "knowledge",
-        documentDialog.selectedDocumentIds
-      );
-      setDocumentSaveBusy(false);
-      if (!created) {
-        setDocumentDialog(current => current
-          ? { ...current, error: current.error || "Could not create this Knowledge Chat." }
-          : current
+      try {
+        const created = await startNewConversation(
+          "knowledge",
+          documentDialog.selectedDocumentIds
         );
+        if (!created) {
+          setDocumentDialog(current => current
+            ? { ...current, error: current.error || "Could not create this Knowledge Chat." }
+            : current
+          );
+        }
+      } finally {
+        saveDocumentsInFlight.current = false;
+        setDocumentSaveBusy(false);
       }
       return;
     }
-    setDocumentSaveBusy(true);
     try {
       const updated = await updateConversationDocuments(
         auth.access_token,
@@ -575,6 +585,7 @@ export default function App() {
         );
       }
     } finally {
+      saveDocumentsInFlight.current = false;
       setDocumentSaveBusy(false);
     }
   }
@@ -1096,7 +1107,48 @@ export default function App() {
                     <span className="empty-state-icon"><Sparkles size={25}/></span>
                     <h1>Welcome to NexaDesk</h1>
                     <p className="empty-subtitle">Your AI workspace. What would you like to work on today?</p>
-                    <div className="prompt-grid">{prompts.map(({icon: Icon, title}) => <button className="prompt-card" key={title} onClick={() => void submit(undefined, title)}><span className="prompt-icon"><Icon size={17}/></span><strong>{title}</strong><ArrowUp size={15} className="prompt-arrow"/></button>)}</div>
+                    {conversationId === null && <>
+                    <div className="chat-mode-grid" role="group" aria-label="Choose a chat mode">
+                      <button
+                        type="button"
+                        className={`chat-mode-card ${selectedChatType === "normal" ? "selected" : ""}`}
+                        aria-pressed={selectedChatType === "normal"}
+                        onClick={() => setSelectedChatType("normal")}
+                      >
+                        <span className="chat-mode-icon"><MessageSquare size={22}/></span>
+                        <span className="chat-mode-copy">
+                          <strong>Normal Conversation</strong>
+                          <span>General AI chat for everyday tasks.</span>
+                        </span>
+                        <span className="chat-mode-indicator" aria-hidden="true">
+                          {selectedChatType === "normal" && <Check size={15}/>}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className={`chat-mode-card ${selectedChatType === "knowledge" ? "selected" : ""}`}
+                        aria-pressed={selectedChatType === "knowledge"}
+                        onClick={() => setSelectedChatType("knowledge")}
+                      >
+                        <span className="chat-mode-icon"><BookOpen size={22}/></span>
+                        <span className="chat-mode-copy">
+                          <strong>Knowledge Base</strong>
+                          <span>Chat with your documents and data.</span>
+                        </span>
+                        <span className="chat-mode-indicator" aria-hidden="true">
+                          {selectedChatType === "knowledge" && <Check size={15}/>}
+                        </span>
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      className="start-chat-button"
+                      disabled={!workspaceId || conversationBusy || busy}
+                      onClick={() => void startNewConversation(selectedChatType)}
+                    >
+                      {conversationBusy ? "Starting…" : "Start Chat"}
+                    </button>
+                    </>}
                   </div>
                   : messages.map(m => <article className={`message-row ${m.role}`} key={m.id}>
                     <div className={`message-avatar ${m.role}`}>{m.role === "assistant" ? <Sparkles size={16}/> : auth.user.email.slice(0, 2).toUpperCase()}</div>
