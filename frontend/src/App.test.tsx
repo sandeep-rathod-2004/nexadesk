@@ -1,5 +1,6 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthResult } from "./lib/api";
 
@@ -63,9 +64,9 @@ async function signIn(user = userEvent.setup(), openNavigation = true) {
   fireEvent.change(screen.getByLabelText("Email"), { target: { value: "person@example.com" } });
   fireEvent.change(screen.getByLabelText("Password"), { target: { value: "a sufficiently long password" } });
   await user.click(screen.getByRole("button", { name: "Sign in" }));
-  await screen.findByRole("heading", { name: "How can I help you today?" });
+  await screen.findByRole("heading", { name: "Welcome to NexaDesk" });
   if (openNavigation) {
-    await user.click(screen.getByRole("button", { name: "Open menu" }));
+    await user.click(screen.getByRole("button", { name: "Open sidebar" }));
     await screen.findByRole("button", { name: /New conversation/ });
   }
   return user;
@@ -188,7 +189,7 @@ describe("conversation management UI", () => {
     });
   });
 
-  it("shows a real chat empty state and submits a suggestion through streaming", async () => {
+  it("shows the permanent welcome dashboard and submits a suggestion through streaming", async () => {
     api.streamChat.mockResolvedValue({
       reply: "A useful explanation.",
       model: "phi3:mini",
@@ -198,8 +199,11 @@ describe("conversation management UI", () => {
     });
     const user = await signIn(userEvent.setup(), false);
 
-    expect(screen.getByRole("heading", { name: "How can I help you today?" })).toBeTruthy();
-    expect(screen.getByText("Ask anything. Let's figure it out together.")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
+    expect(screen.getByText(
+      "Your AI workspace. What would you like to work on today?"
+    )).toBeTruthy();
+    expect(screen.queryByText(/Good morning|Good afternoon|Good evening/)).toBeNull();
     expect(screen.queryByText(/Hey there! I’m NexaDesk/)).toBeNull();
     expect(document.querySelectorAll(".prompt-card")).toHaveLength(3);
 
@@ -216,10 +220,11 @@ describe("conversation management UI", () => {
       expect.any(Function)
     ));
     expect(await screen.findByText("A useful explanation.")).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "How can I help you today?" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Welcome to NexaDesk" })).toBeNull();
   });
 
-  it("opens and dismisses the navigation drawer and first-use hint", async () => {
+  it("opens and dismisses the mobile navigation drawer and first-use hint", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
     const user = await signIn(userEvent.setup(), false);
 
     expect(screen.getByText("Open navigation — Explore your workspace features")).toBeTruthy();
@@ -234,6 +239,42 @@ describe("conversation management UI", () => {
     await user.keyboard("{Escape}");
     expect(screen.getByRole("button", { name: "Open menu" }).getAttribute("aria-expanded")).toBe("false");
     expect(window.localStorage.getItem("nexadesk.navigation-hint.user-1")).toBe("dismissed");
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
+    fireEvent(window, new Event("resize"));
+  });
+
+  it("collapses and reopens the desktop sidebar while preserving its preference", async () => {
+    const user = await signIn(userEvent.setup(), false);
+    const sidebar = screen.getByRole("complementary", {
+      hidden: true
+    });
+    const toggle = screen.getByRole("button", { name: "Open sidebar" });
+
+    expect(sidebar.getAttribute("aria-hidden")).toBe("true");
+    await user.click(toggle);
+    expect(sidebar.getAttribute("aria-hidden")).toBe("false");
+    expect(screen.getByRole("region", { name: "Normal Chats" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Knowledge Chats" })).toBeTruthy();
+    expect(window.localStorage.getItem("nexadesk.sidebar.user-1")).toBe("expanded");
+
+    await user.click(within(screen.getByRole("banner")).getByRole("button", {
+      name: "Collapse sidebar"
+    }));
+    expect(sidebar.getAttribute("aria-hidden")).toBe("true");
+    expect(window.localStorage.getItem("nexadesk.sidebar.user-1")).toBe("collapsed");
+    await user.click(screen.getByRole("button", { name: "Open sidebar" }));
+    expect(sidebar.getAttribute("aria-hidden")).toBe("false");
+
+    cleanup();
+    api.refreshSession.mockResolvedValue(access);
+    render(<App />);
+    await screen.findByRole("heading", { name: "Welcome to NexaDesk" });
+    expect(
+      screen.getByRole("complementary", { name: "Workspace navigation" }).getAttribute("aria-hidden")
+    ).toBe("false");
+    expect(within(screen.getByRole("banner")).getByRole("button", {
+      name: "Collapse sidebar"
+    })).toBeTruthy();
   });
 
   it("shows the backend-configured Ollama model", async () => {
@@ -292,40 +333,6 @@ describe("conversation management UI", () => {
     );
   });
 
-  it("updates the greeting from local time while the dashboard stays open", async () => {
-    let localHour = 11;
-    let updateGreeting: (() => void) | undefined;
-    const hourSpy = vi.spyOn(Date.prototype, "getHours")
-      .mockImplementation(() => localHour);
-    const intervalSpy = vi.spyOn(window, "setInterval")
-      .mockImplementation((handler, delay) => {
-        if (delay === 60_000 && typeof handler === "function") {
-          updateGreeting = () => handler();
-        }
-        return 0;
-      });
-
-    try {
-      await signIn();
-      expect(screen.getByText("Good morning")).toBeTruthy();
-
-      localHour = 12;
-      act(() => updateGreeting?.());
-      expect(screen.getByText("Good afternoon")).toBeTruthy();
-
-      localHour = 17;
-      act(() => updateGreeting?.());
-      expect(screen.getByText("Good evening")).toBeTruthy();
-
-      localHour = 4;
-      act(() => updateGreeting?.());
-      expect(screen.getByText("Good evening")).toBeTruthy();
-    } finally {
-      hourSpy.mockRestore();
-      intervalSpy.mockRestore();
-    }
-  });
-
   it("creates conversations, loads history, renames and confirms deletion", async () => {
     const user = await signIn();
     await user.click(screen.getByRole("button", { name: /New conversation/ }));
@@ -334,7 +341,6 @@ describe("conversation management UI", () => {
       "in-memory-token",
       "workspace-1"
     );
-    await user.click(screen.getByRole("button", { name: "Open menu" }));
     const conversationButton = await screen.findByRole("button", { name: /^Planning notes$/ });
     await user.click(conversationButton);
     await waitFor(() => expect(api.getMessages).toHaveBeenCalledWith(
@@ -342,7 +348,6 @@ describe("conversation management UI", () => {
       "conversation-1"
     ));
 
-    await user.click(screen.getByRole("button", { name: "Open menu" }));
     await user.click(screen.getByRole("button", { name: "Rename Planning notes" }));
     const titleInput = screen.getByRole("textbox", { name: "Conversation title" });
     await user.clear(titleInput);
@@ -411,7 +416,7 @@ describe("conversation management UI", () => {
       "knowledge",
       ["document-1"]
     ));
-    expect(await screen.findByRole("heading", { name: "How can I help you today?" })).toBeTruthy();
+    expect(await screen.findByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
   });
 
   it("updates sources for an existing Knowledge Chat", async () => {
@@ -577,8 +582,8 @@ describe("conversation management UI", () => {
 
     render(<App />);
 
-    await screen.findByRole("heading", { name: "How can I help you today?" });
-    await userEvent.setup().click(screen.getByRole("button", { name: "Open menu" }));
+    await screen.findByRole("heading", { name: "Welcome to NexaDesk" });
+    await userEvent.setup().click(screen.getByRole("button", { name: "Open sidebar" }));
     await screen.findByRole("button", { name: /New conversation/ });
     expect(api.setAccessToken).toHaveBeenCalledWith("in-memory-token");
     expect(
@@ -630,6 +635,64 @@ describe("conversation management UI", () => {
     ));
   });
 
+  it("shows a bounded session restoration error and retries server validation", async () => {
+    api.refreshSession
+      .mockRejectedValueOnce(new Error("Network unavailable"))
+      .mockResolvedValueOnce(access);
+    render(<App />);
+
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Welcome to NexaDesk" })).toBeNull();
+    await userEvent.setup().click(
+      screen.getByRole("button", { name: "Retry session restoration" })
+    );
+    expect(await screen.findByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
+    expect(api.refreshSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows a retry state instead of loading forever when validation is slow", async () => {
+    vi.useFakeTimers();
+    api.refreshSession.mockImplementation(() => new Promise(() => undefined));
+    render(<App />);
+
+    expect(screen.getByText("Restoring your session…")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Welcome to NexaDesk" })).toBeNull();
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+
+    expect(screen.getByText("Session restoration is taking longer than expected.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry session restoration" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Welcome to NexaDesk" })).toBeNull();
+  });
+
+  it("does not render protected dashboard content before session validation succeeds", async () => {
+    let resolveSession: ((result: AuthResult) => void) | undefined;
+    api.refreshSession.mockImplementation(() => new Promise(resolve => {
+      resolveSession = resolve;
+    }));
+    render(<App />);
+
+    expect(screen.getByText("Restoring your session…")).toBeTruthy();
+    expect(screen.queryByText("Workspace One")).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Welcome to NexaDesk" })).toBeNull();
+    await act(async () => resolveSession?.(access));
+    expect(await screen.findByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
+  });
+
+  it("completes session restoration safely through StrictMode effect replay", async () => {
+    let resolveSession: ((result: AuthResult) => void) | undefined;
+    api.refreshSession.mockImplementation(() => new Promise(resolve => {
+      resolveSession = resolve;
+    }));
+    render(<StrictMode><App /></StrictMode>);
+
+    expect(api.refreshSession).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("Restoring your session…")).toBeTruthy();
+    await act(async () => resolveSession?.(access));
+    expect(await screen.findByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
+  });
+
   it("supports Escape cancellation while the chat input is focused", async () => {
     const user = await signIn();
     let finishStream: ((result: {
@@ -679,8 +742,9 @@ describe("conversation management UI", () => {
     expect(screen.getByRole("status").textContent).toContain("Loading conversation");
 
     rejectMessages?.(new Error("Conversation could not be loaded."));
-    expect(await screen.findByRole("alert")).toBeTruthy();
-    await user.click(screen.getByRole("button", { name: "Open menu" }));
+    expect(await screen.findByText("Conversation could not be loaded.", {
+      selector: ".conversation-error"
+    })).toBeTruthy();
     expect(await screen.findByRole("button", { name: /^Planning notes$/ })).toBeTruthy();
   });
 

@@ -32,12 +32,7 @@ const prompts = [
   { icon: FileText, title: "Help me write something" },
   { icon: Sparkles, title: "Brainstorm new ideas" }
 ];
-
-function greetingForHour(hour: number): string {
-  if (hour >= 5 && hour < 12) return "Good morning";
-  if (hour >= 12 && hour < 17) return "Good afternoon";
-  return "Good evening";
-}
+const SESSION_RESTORE_TIMEOUT_MS = 10_000;
 
 function authPageFromPath(pathname: string): AuthPageRoute {
   if (pathname === "/register") return "register";
@@ -62,18 +57,28 @@ function navigationHintKey(userId: string): string {
   return `nexadesk.navigation-hint.${userId}`;
 }
 
+function sidebarPreferenceKey(userId: string): string {
+  return `nexadesk.sidebar.${userId}`;
+}
+
 export default function App() {
   const [messages, setMessages] = useState<Message[]>(initial);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [mobileNav, setMobileNav] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  const [isMobileLayout, setIsMobileLayout] = useState(
+    () => window.matchMedia?.("(max-width: 820px)").matches ?? window.innerWidth <= 820
+  );
   const [navigationHintVisible, setNavigationHintVisible] = useState(false);
   const [activeView, setActiveView] = useState<"conversations" | "knowledge">("conversations");
   const [auth, setAuth] = useState<AuthResult | null>(null);
   const [authRestoring, setAuthRestoring] = useState(true);
+  const [authRestoreFailed, setAuthRestoreFailed] = useState(false);
+  const [authRestoreTimedOut, setAuthRestoreTimedOut] = useState(false);
+  const [restoreAttempt, setRestoreAttempt] = useState(0);
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [modelInfoUnavailable, setModelInfoUnavailable] = useState(false);
-  const [greeting, setGreeting] = useState(() => greetingForHour(new Date().getHours()));
   const [authPage, setAuthPage] = useState<AuthPageRoute>(() => authPageFromPath(window.location.pathname));
   const [workspaceId, setWorkspaceId] = useState("");
   const [authError, setAuthError] = useState("");
@@ -128,20 +133,31 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const updateGreeting = () => setGreeting(greetingForHour(new Date().getHours()));
-    const intervalId = window.setInterval(updateGreeting, 60_000);
-    window.addEventListener("focus", updateGreeting);
+    const mediaQuery = window.matchMedia?.("(max-width: 820px)");
+    const updateLayout = () => {
+      const mobile = mediaQuery?.matches ?? window.innerWidth <= 820;
+      setIsMobileLayout(mobile);
+      if (!mobile) setMobileNav(false);
+    };
+    window.addEventListener("resize", updateLayout);
+    mediaQuery?.addEventListener("change", updateLayout);
     return () => {
-      window.clearInterval(intervalId);
-      window.removeEventListener("focus", updateGreeting);
+      window.removeEventListener("resize", updateLayout);
+      mediaQuery?.removeEventListener("change", updateLayout);
     };
   }, []);
 
   useEffect(() => {
     let active = true;
+    let settled = false;
+    const timeoutId = window.setTimeout(() => {
+      if (active && !settled) setAuthRestoreTimedOut(true);
+    }, SESSION_RESTORE_TIMEOUT_MS);
     void refreshSession()
       .then(result => {
         if (!active) return;
+        setAuthRestoreFailed(false);
+        setAuthRestoreTimedOut(false);
         setAccessToken(result.access_token);
         setAuth(result);
         const key = `nexadesk.workspace.${result.user.id}`;
@@ -160,14 +176,21 @@ export default function App() {
           window.history.replaceState(null, "", "/");
         }
       })
-      .catch(() => {
-        if (active) setAccessToken(null);
+      .catch(error => {
+        if (!active) return;
+        setAccessToken(null);
+        setAuthRestoreFailed(!(error instanceof ApiError && error.status === 401));
       })
       .finally(() => {
+        settled = true;
+        window.clearTimeout(timeoutId);
         if (active) setAuthRestoring(false);
       });
-    return () => { active = false; };
-  }, []);
+    return () => {
+      active = false;
+      window.clearTimeout(timeoutId);
+    };
+  }, [restoreAttempt]);
 
   useEffect(() => {
     if (!auth) {
@@ -211,6 +234,13 @@ export default function App() {
   }, [auth]);
 
   useEffect(() => {
+    if (!auth) return;
+    setSidebarCollapsed(
+      window.localStorage.getItem(sidebarPreferenceKey(auth.user.id)) !== "expanded"
+    );
+  }, [auth?.user.id]);
+
+  useEffect(() => {
     if (!mobileNav) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setMobileNav(false);
@@ -230,9 +260,11 @@ export default function App() {
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [documentDialog, documentSaveBusy]);
 
+  const sidebarHidden = isMobileLayout ? !mobileNav : sidebarCollapsed;
+
   useEffect(() => {
-    sidebarRef.current?.toggleAttribute("inert", !mobileNav);
-  }, [mobileNav]);
+    sidebarRef.current?.toggleAttribute("inert", sidebarHidden);
+  }, [sidebarHidden]);
 
   useEffect(() => {
     if (!auth || !workspaceId) {
@@ -316,12 +348,43 @@ export default function App() {
     }
   }
 
-  function openNavigation() {
-    setMobileNav(true);
+  function toggleNavigation() {
     setNavigationHintVisible(false);
     if (auth) {
       window.localStorage.setItem(navigationHintKey(auth.user.id), "dismissed");
     }
+    if (isMobileLayout) {
+      setMobileNav(value => !value);
+      return;
+    }
+    setSidebarCollapsed(value => {
+      const next = !value;
+      if (auth) {
+        window.localStorage.setItem(
+          sidebarPreferenceKey(auth.user.id),
+          next ? "collapsed" : "expanded"
+        );
+      }
+      return next;
+    });
+  }
+
+  function closeNavigation() {
+    if (isMobileLayout) {
+      setMobileNav(false);
+      return;
+    }
+    setSidebarCollapsed(true);
+    if (auth) {
+      window.localStorage.setItem(sidebarPreferenceKey(auth.user.id), "collapsed");
+    }
+  }
+
+  function retrySessionRestore() {
+    setAuthRestoreFailed(false);
+    setAuthRestoreTimedOut(false);
+    setAuthRestoring(true);
+    setRestoreAttempt(attempt => attempt + 1);
   }
 
   function signOut() {
@@ -899,6 +962,16 @@ export default function App() {
       ? "Messages are processed by your configured local Ollama runtime."
       : "AI provider information is currently unavailable.";
 
+  if ((authRestoring && authRestoreTimedOut) || (!authRestoring && authRestoreFailed)) {
+    return <main className="auth-page"><section className="auth-card session-restore-error" role="alert">
+      <div className="brand-row auth-brand"><div className="brand-mark"><Sparkles size={19}/></div><span className="brand-name">nexa<span>desk</span></span></div>
+      <p>{authRestoreTimedOut
+        ? "Session restoration is taking longer than expected."
+        : "We couldn't restore your session. Check your connection and try again."}</p>
+      <button type="button" className="auth-submit" onClick={retrySessionRestore}>Retry session restoration</button>
+    </section></main>;
+  }
+
   if (authRestoring) {
     return <main className="auth-page"><section className="auth-card" role="status">
       <div className="brand-row auth-brand"><div className="brand-mark"><Sparkles size={19}/></div><span className="brand-name">nexa<span>desk</span></span></div>
@@ -916,8 +989,8 @@ export default function App() {
   }
 
   return <div className="app-shell">
-    <aside ref={sidebarRef} id="workspace-navigation" className={`sidebar ${mobileNav ? "sidebar-open" : ""}`} aria-label="Workspace navigation" aria-hidden={!mobileNav}>
-      <div className="brand-row"><div className="brand-mark"><Sparkles size={19}/></div><span className="brand-name">nexa<span>desk</span></span><button className="icon-button mobile-close" onClick={() => setMobileNav(false)} aria-label="Close menu"><X size={18}/></button></div>
+    <aside ref={sidebarRef} id="workspace-navigation" className={`sidebar ${mobileNav ? "sidebar-open" : ""} ${sidebarCollapsed ? "sidebar-collapsed" : ""}`} aria-label="Workspace navigation" aria-hidden={sidebarHidden}>
+      <div className="brand-row"><div className="brand-mark"><Sparkles size={19}/></div><span className="brand-name">nexa<span>desk</span></span><button className="icon-button mobile-close" onClick={closeNavigation} aria-label={isMobileLayout ? "Close menu" : "Collapse sidebar"}><X size={18}/></button></div>
       <label className="workspace-switch"><div className="workspace-avatar">N</div><div className="workspace-copy"><strong>{auth.workspaces.find(item => item.id === workspaceId)?.name ?? "Workspace"}</strong><small>{auth.user.email}</small></div><ChevronDown size={15} aria-hidden="true"/><select aria-label="Select workspace" value={workspaceId} onChange={event => {
         const selectedId = event.target.value;
         setWorkspaceId(selectedId);
@@ -975,7 +1048,7 @@ export default function App() {
     <main className={`main-panel ${activeView === "conversations" ? "chat-main-panel" : ""}`}>
       <header className="topbar">
         <div className="topbar-left">
-          <button className="icon-button nav-toggle" onClick={openNavigation} aria-label="Open menu" aria-controls="workspace-navigation" aria-expanded={mobileNav}><Menu size={21}/></button>
+          <button className="icon-button nav-toggle" onClick={toggleNavigation} aria-label={isMobileLayout ? (mobileNav ? "Close menu" : "Open menu") : (sidebarCollapsed ? "Open sidebar" : "Collapse sidebar")} title={isMobileLayout ? (mobileNav ? "Close navigation" : "Open navigation") : (sidebarCollapsed ? "Open sidebar" : "Collapse sidebar")} aria-controls="workspace-navigation" aria-expanded={isMobileLayout ? mobileNav : !sidebarCollapsed}><Menu size={21}/></button>
           {navigationHintVisible && <div className="navigation-hint" role="status">Open navigation — Explore your workspace features</div>}
           <div className="topbar-brand"><span className="brand-mark"><Sparkles size={17}/></span><span className="brand-name">nexa<span>desk</span></span></div>
         </div>
@@ -1021,9 +1094,8 @@ export default function App() {
                 : messages.length === 0
                   ? <div className="empty-state">
                     <span className="empty-state-icon"><Sparkles size={25}/></span>
-                    <p className="empty-greeting">{greeting}</p>
-                    <h1>How can I help you today?</h1>
-                    <p className="empty-subtitle">Ask anything. Let&apos;s figure it out together.</p>
+                    <h1>Welcome to NexaDesk</h1>
+                    <p className="empty-subtitle">Your AI workspace. What would you like to work on today?</p>
                     <div className="prompt-grid">{prompts.map(({icon: Icon, title}) => <button className="prompt-card" key={title} onClick={() => void submit(undefined, title)}><span className="prompt-icon"><Icon size={17}/></span><strong>{title}</strong><ArrowUp size={15} className="prompt-arrow"/></button>)}</div>
                   </div>
                   : messages.map(m => <article className={`message-row ${m.role}`} key={m.id}>

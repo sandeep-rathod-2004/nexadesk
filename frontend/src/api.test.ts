@@ -9,6 +9,7 @@ import {
   listKnowledgeDocuments,
   listConversations,
   renameConversation,
+  refreshSession,
   setAccessToken,
   streamChat,
   uploadKnowledgeDocument
@@ -29,6 +30,44 @@ afterEach(() => {
 });
 
 describe("conversation API client", () => {
+  it("shares one in-flight session restoration request", async () => {
+    let resolveResponse: ((response: Response) => void) | undefined;
+    const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Promise<Response>(resolve => {
+      resolveResponse = resolve;
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = refreshSession();
+    const second = refreshSession();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await vi.waitFor(() => expect(resolveResponse).toBeDefined());
+    resolveResponse?.(new Response(JSON.stringify({
+      access_token: "restored-access-token",
+      token_type: "bearer",
+      user: { id: "user-1", email: "person@example.com" },
+      workspaces: []
+    }), { status: 200 }));
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      {
+        access_token: "restored-access-token",
+        token_type: "bearer",
+        user: { id: "user-1", email: "person@example.com" },
+        workspaces: []
+      },
+      {
+        access_token: "restored-access-token",
+        token_type: "bearer",
+        user: { id: "user-1", email: "person@example.com" },
+        workspaces: []
+      }
+    ]);
+    expect(fetchMock.mock.calls[0]?.[1]?.credentials).toBe("include");
+  });
+
   it("reads the authenticated backend model configuration", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ provider: "Ollama", model: "phi3:mini" }), { status: 200 })
