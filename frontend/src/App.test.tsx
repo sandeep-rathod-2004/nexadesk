@@ -208,7 +208,7 @@ describe("conversation management UI", () => {
     await waitFor(() => expect(api.createConversation).toHaveBeenCalledTimes(1));
     expect(api.createConversation).toHaveBeenCalledWith("in-memory-token", "workspace-1");
     expect(screen.getByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Start Chat" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Start Chat" })).toBeTruthy();
   });
 
   it("changes the selected chat mode and opens document selection for Knowledge Base", async () => {
@@ -659,6 +659,29 @@ describe("conversation management UI", () => {
     render(<App />);
 
     expect(await screen.findByText("Earlier question")).toBeTruthy();
+    expect(screen.queryByRole("group", { name: "Choose a chat mode" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Start Chat" })).toBeNull();
+    expect(api.getMessages).toHaveBeenCalledWith(
+      "in-memory-token",
+      "conversation-1"
+    );
+  });
+
+  it("shows chat mode selection after refresh restores an empty conversation", async () => {
+    window.history.replaceState(null, "", "/");
+    window.sessionStorage.setItem(
+      "nexadesk.conversation.user-1.workspace-1",
+      "conversation-1"
+    );
+    api.refreshSession.mockResolvedValue(access);
+    api.listConversations.mockResolvedValue([firstConversation]);
+    api.getMessages.mockResolvedValue([]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
+    expect(await screen.findByRole("group", { name: "Choose a chat mode" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Start Chat" })).toBeTruthy();
     expect(api.getMessages).toHaveBeenCalledWith(
       "in-memory-token",
       "conversation-1"

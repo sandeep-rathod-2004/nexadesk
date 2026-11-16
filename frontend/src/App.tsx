@@ -1107,7 +1107,6 @@ export default function App() {
                     <span className="empty-state-icon"><Sparkles size={25}/></span>
                     <h1>Welcome to NexaDesk</h1>
                     <p className="empty-subtitle">Your AI workspace. What would you like to work on today?</p>
-                    {conversationId === null && <>
                     <div className="chat-mode-grid" role="group" aria-label="Choose a chat mode">
                       <button
                         type="button"
@@ -1148,7 +1147,6 @@ export default function App() {
                     >
                       {conversationBusy ? "Starting…" : "Start Chat"}
                     </button>
-                    </>}
                   </div>
                   : messages.map(m => <article className={`message-row ${m.role}`} key={m.id}>
                     <div className={`message-avatar ${m.role}`}>{m.role === "assistant" ? <Sparkles size={16}/> : auth.user.email.slice(0, 2).toUpperCase()}</div>
