@@ -8,6 +8,7 @@ const api = vi.hoisted(() => ({
   register: vi.fn(),
   login: vi.fn(),
   refreshSession: vi.fn(),
+  retryRefreshSession: vi.fn(),
   setAccessToken: vi.fn(),
   logout: vi.fn(),
   getModel: vi.fn(),
@@ -79,6 +80,7 @@ describe("conversation management UI", () => {
     window.sessionStorage.clear();
     window.localStorage.clear();
     api.refreshSession.mockRejectedValue(new api.ApiError("No session", 401));
+    api.retryRefreshSession.mockRejectedValue(new api.ApiError("No session", 401));
     api.logout.mockResolvedValue(undefined);
     api.listConversations.mockResolvedValue([]);
     api.listKnowledgeDocuments.mockResolvedValue([]);
@@ -207,8 +209,12 @@ describe("conversation management UI", () => {
     await user.click(screen.getByRole("button", { name: "Start Chat" }));
     await waitFor(() => expect(api.createConversation).toHaveBeenCalledTimes(1));
     expect(api.createConversation).toHaveBeenCalledWith("in-memory-token", "workspace-1");
-    expect(screen.getByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Start Chat" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Welcome to NexaDesk" })).toBeNull();
+    expect(screen.queryByRole("group", { name: "Choose a chat mode" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Start Chat" })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(
+      screen.getByRole("textbox", { name: "Message NexaDesk" })
+    ));
   });
 
   it("changes the selected chat mode and opens document selection for Knowledge Base", async () => {
@@ -254,6 +260,36 @@ describe("conversation management UI", () => {
       ["document-1"]
     ));
     expect(api.createConversation).toHaveBeenCalledTimes(1);
+  });
+
+  it("new chat from Knowledge Base returns to welcome while preserving history", async () => {
+    api.listConversations.mockResolvedValue([{
+      ...firstConversation,
+      chat_type: "knowledge",
+      document_ids: ["document-1"]
+    }]);
+    const user = await signIn(userEvent.setup(), false);
+
+    await user.click(screen.getByRole("button", { name: /knowledge/i }));
+    await user.click(screen.getByRole("button", { name: "Start a new chat" }));
+
+    expect(await screen.findByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Normal Conversation/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Knowledge Base/ })).toBeTruthy();
+    await user.click(screen.getByRole("button", { name: "Open sidebar" }));
+    expect(await screen.findByRole("button", { name: /^Planning notes$/ })).toBeTruthy();
+  });
+
+  it("keeps the welcome state valid when creating a conversation fails", async () => {
+    api.createConversation.mockRejectedValueOnce(new Error("Could not create a conversation."));
+    const user = await signIn(userEvent.setup(), false);
+
+    await user.click(screen.getByRole("button", { name: "Start Chat" }));
+
+    expect((await screen.findAllByText("Could not create a conversation."))[0]).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Start Chat" })).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "Message NexaDesk" })).toBeTruthy();
   });
 
   it("prevents duplicate Normal Chat creation on repeated Start Chat clicks", async () => {
@@ -460,7 +496,9 @@ describe("conversation management UI", () => {
       "knowledge",
       ["document-1"]
     ));
-    expect(await screen.findByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Welcome to NexaDesk" })).toBeNull();
+    expect(screen.queryByRole("group", { name: "Choose a chat mode" })).toBeNull();
+    expect(screen.getByRole("textbox", { name: "Message NexaDesk" })).toBeTruthy();
   });
 
   it("updates sources for an existing Knowledge Chat", async () => {
@@ -679,9 +717,12 @@ describe("conversation management UI", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
-    expect(await screen.findByRole("group", { name: "Choose a chat mode" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Start Chat" })).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.queryByRole("heading", { name: "Welcome to NexaDesk" })).toBeNull();
+      expect(screen.queryByRole("group", { name: "Choose a chat mode" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Start Chat" })).toBeNull();
+      expect(screen.getByRole("textbox", { name: "Message NexaDesk" })).toBeTruthy();
+    });
     expect(api.getMessages).toHaveBeenCalledWith(
       "in-memory-token",
       "conversation-1"
@@ -703,18 +744,17 @@ describe("conversation management UI", () => {
   });
 
   it("shows a bounded session restoration error and retries server validation", async () => {
-    api.refreshSession
-      .mockRejectedValueOnce(new Error("Network unavailable"))
-      .mockResolvedValueOnce(access);
+    api.refreshSession.mockRejectedValueOnce(new Error("Network unavailable"));
+    api.retryRefreshSession.mockResolvedValueOnce(access);
     render(<App />);
 
     expect(await screen.findByRole("alert")).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "Welcome to NexaDesk" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
     await userEvent.setup().click(
       screen.getByRole("button", { name: "Retry session restoration" })
     );
     expect(await screen.findByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
-    expect(api.refreshSession).toHaveBeenCalledTimes(2);
+    expect(api.retryRefreshSession).toHaveBeenCalledTimes(1);
   });
 
   it("shows a retry state instead of loading forever when validation is slow", async () => {
@@ -723,14 +763,14 @@ describe("conversation management UI", () => {
     render(<App />);
 
     expect(screen.getByText("Restoring your session…")).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "Welcome to NexaDesk" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
     await act(async () => {
       vi.advanceTimersByTime(10_000);
     });
 
     expect(screen.getByText("Session restoration is taking longer than expected.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry session restoration" })).toBeTruthy();
-    expect(screen.queryByRole("heading", { name: "Welcome to NexaDesk" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
   });
 
   it("does not render protected dashboard content before session validation succeeds", async () => {
@@ -742,9 +782,31 @@ describe("conversation management UI", () => {
 
     expect(screen.getByText("Restoring your session…")).toBeTruthy();
     expect(screen.queryByText("Workspace One")).toBeNull();
-    expect(screen.queryByRole("heading", { name: "Welcome to NexaDesk" })).toBeNull();
+    expect(screen.getByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
     await act(async () => resolveSession?.(access));
     expect(await screen.findByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
+  });
+
+  it("ignores stale refresh responses after a newer restoration attempt", async () => {
+    vi.useFakeTimers();
+    let resolveInitial: ((result: AuthResult) => void) | undefined;
+    api.refreshSession.mockImplementationOnce(() => new Promise(resolve => {
+      resolveInitial = resolve;
+    }));
+    api.retryRefreshSession.mockResolvedValueOnce(access);
+
+    render(<App />);
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+
+    fireEvent.click(screen.getByRole("button", { name: "Retry session restoration" }));
+    await act(async () => vi.runAllTimersAsync());
+
+    await act(async () => resolveInitial?.({
+      ...access,
+      user: { id: "stale-user", email: "stale@example.com" }
+    }));
+
+    expect(screen.queryByText("stale@example.com")).toBeNull();
   });
 
   it("completes session restoration safely through StrictMode effect replay", async () => {

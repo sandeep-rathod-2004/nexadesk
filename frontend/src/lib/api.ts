@@ -84,23 +84,46 @@ export class ApiError extends Error {
 
 let sessionAccessToken: string | null = null;
 let refreshInFlight: Promise<AuthResult> | null = null;
+let refreshAbortController: AbortController | null = null;
+const REFRESH_REQUEST_TIMEOUT_MS = 10_000;
 
 export function setAccessToken(token: string | null): void {
   sessionAccessToken = token;
 }
 
 export function refreshSession(): Promise<AuthResult> {
-  if (!refreshInFlight) {
-    refreshInFlight = request<AuthResult>("/auth/refresh", { method: "POST" })
-      .then(result => {
-        setAccessToken(result.access_token);
-        return result;
-      })
-      .finally(() => {
+  if (refreshInFlight) return refreshInFlight;
+
+  refreshAbortController = new AbortController();
+  const controller = refreshAbortController;
+  const timeoutId = window.setTimeout(() => controller.abort(), REFRESH_REQUEST_TIMEOUT_MS);
+
+  refreshInFlight = request<AuthResult>("/auth/refresh", {
+    method: "POST",
+    signal: controller.signal
+  })
+    .then(result => {
+      setAccessToken(result.access_token);
+      return result;
+    })
+    .finally(() => {
+      window.clearTimeout(timeoutId);
+      if (refreshAbortController === controller) {
         refreshInFlight = null;
-      });
-  }
+        refreshAbortController = null;
+      }
+    });
   return refreshInFlight;
+}
+
+export async function retryRefreshSession(): Promise<AuthResult> {
+  const previous = refreshInFlight;
+  if (previous) {
+    await previous.catch(() => undefined);
+  }
+
+  if (refreshInFlight) return refreshSession();
+  return refreshSession();
 }
 
 async function fetchWithSession(

@@ -10,6 +10,7 @@ import {
   listConversations,
   renameConversation,
   refreshSession,
+  retryRefreshSession,
   setAccessToken,
   streamChat,
   uploadKnowledgeDocument
@@ -66,6 +67,38 @@ describe("conversation API client", () => {
       }
     ]);
     expect(fetchMock.mock.calls[0]?.[1]?.credentials).toBe("include");
+  });
+
+  it("times out one refresh request and allows a retry after settlement", async () => {
+    vi.useFakeTimers();
+    let callCount = 0;
+    const fetchMock = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      callCount += 1;
+      if (callCount === 1) {
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted", "AbortError"));
+          });
+        });
+      }
+      return Promise.resolve(new Response(JSON.stringify({
+        access_token: "retried-access-token",
+        token_type: "bearer",
+        user: { id: "user-1", email: "person@example.com" },
+        workspaces: []
+      }), { status: 200 }));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const pending = refreshSession();
+    const pendingResult = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await pendingResult;
+
+    await expect(retryRefreshSession()).resolves.toMatchObject({
+      access_token: "retried-access-token"
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("reads the authenticated backend model configuration", async () => {

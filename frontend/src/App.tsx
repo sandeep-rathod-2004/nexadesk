@@ -9,7 +9,7 @@ import {
   ApiError, AuthResult, Conversation, createConversation, deleteConversation,
   cancelChat, getMessages, getModel, KnowledgeDocument, listConversations,
   listKnowledgeDocuments, logout, ModelInfo, PersistedMessage,
-  refreshSession, setAccessToken,
+  refreshSession, retryRefreshSession, setAccessToken,
   renameConversation, SourceReference, StreamMilestone, streamChat,
   updateConversationDocuments
 } from "./lib/api";
@@ -28,6 +28,7 @@ type Message = {
 };
 const initial: Message[] = [];
 const SESSION_RESTORE_TIMEOUT_MS = 10_000;
+type RestorationStatus = "restoring" | "authenticated" | "unauthenticated" | "network_error" | "timed_out";
 
 function authPageFromPath(pathname: string): AuthPageRoute {
   if (pathname === "/register") return "register";
@@ -63,15 +64,15 @@ export default function App() {
   const [mobileNav, setMobileNav] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [selectedChatType, setSelectedChatType] = useState<"normal" | "knowledge">("normal");
+  const [welcomeVisible, setWelcomeVisible] = useState(true);
   const [isMobileLayout, setIsMobileLayout] = useState(
     () => window.matchMedia?.("(max-width: 820px)").matches ?? window.innerWidth <= 820
   );
   const [navigationHintVisible, setNavigationHintVisible] = useState(false);
   const [activeView, setActiveView] = useState<"conversations" | "knowledge">("conversations");
   const [auth, setAuth] = useState<AuthResult | null>(null);
-  const [authRestoring, setAuthRestoring] = useState(true);
-  const [authRestoreFailed, setAuthRestoreFailed] = useState(false);
-  const [authRestoreTimedOut, setAuthRestoreTimedOut] = useState(false);
+  const [restorationStatus, setRestorationStatus] =
+    useState<RestorationStatus>("restoring");
   const [restoreAttempt, setRestoreAttempt] = useState(0);
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [modelInfoUnavailable, setModelInfoUnavailable] = useState(false);
@@ -104,6 +105,7 @@ export default function App() {
   const startConversationInFlight = useRef(false);
   const saveDocumentsInFlight = useRef(false);
   const sidebarRef = useRef<HTMLElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const activeChatRequest = useRef<AbortController | null>(null);
   const activeRequestId = useRef<string | null>(null);
   const stopRequested = useRef(false);
@@ -123,6 +125,13 @@ export default function App() {
   const normalChats = conversations.filter(conversation => conversation.chat_type !== "knowledge");
   const knowledgeChats = conversations.filter(conversation => conversation.chat_type === "knowledge");
   const activeConversation = conversations.find(item => item.id === conversationId) ?? null;
+
+  useEffect(() => {
+    if (!welcomeVisible && !messagesLoading) {
+      const frame = window.requestAnimationFrame(() => textareaRef.current?.focus());
+      return () => window.cancelAnimationFrame(frame);
+    }
+  }, [welcomeVisible, messagesLoading, conversationId]);
 
   useEffect(() => {
     const handlePopState = () => setAuthPage(authPageFromPath(window.location.pathname));
@@ -145,19 +154,23 @@ export default function App() {
     };
   }, []);
 
+  const restorationGeneration = useRef(0);
+
   useEffect(() => {
     let active = true;
-    let settled = false;
+    const generation = ++restorationGeneration.current;
+    setRestorationStatus("restoring");
     const timeoutId = window.setTimeout(() => {
-      if (active && !settled) setAuthRestoreTimedOut(true);
+      if (active && restorationGeneration.current === generation) {
+        setRestorationStatus("timed_out");
+      }
     }, SESSION_RESTORE_TIMEOUT_MS);
-    void refreshSession()
+    void (restoreAttempt === 0 ? refreshSession() : retryRefreshSession())
       .then(result => {
-        if (!active) return;
-        setAuthRestoreFailed(false);
-        setAuthRestoreTimedOut(false);
+        if (!active || restorationGeneration.current !== generation) return;
         setAccessToken(result.access_token);
         setAuth(result);
+        setRestorationStatus("authenticated");
         const key = `nexadesk.workspace.${result.user.id}`;
         const savedWorkspace = window.sessionStorage.getItem(key);
         const selectedWorkspace = result.workspaces.find(
@@ -175,14 +188,18 @@ export default function App() {
         }
       })
       .catch(error => {
-        if (!active) return;
+        if (!active || restorationGeneration.current !== generation) return;
         setAccessToken(null);
-        setAuthRestoreFailed(!(error instanceof ApiError && error.status === 401));
+        setAuth(null);
+        setRestorationStatus(current => {
+          if (current === "timed_out") return "timed_out";
+          return error instanceof ApiError && error.status === 401
+            ? "unauthenticated"
+            : "network_error";
+        });
       })
       .finally(() => {
-        settled = true;
         window.clearTimeout(timeoutId);
-        if (active) setAuthRestoring(false);
       });
     return () => {
       active = false;
@@ -301,6 +318,7 @@ export default function App() {
     conversationListRequest.current += 1;
     setAccessToken(null);
     setAuth(null);
+    setRestorationStatus("unauthenticated");
     window.history.replaceState(null, "", "/login");
     setAuthPage("login");
     setActiveView("conversations");
@@ -322,8 +340,10 @@ export default function App() {
   }
 
   function acceptLogin(result: AuthResult) {
+    setWelcomeVisible(true);
     setAccessToken(result.access_token);
     setAuth(result);
+    setRestorationStatus("authenticated");
     const key = `nexadesk.workspace.${result.user.id}`;
     const savedWorkspace = window.sessionStorage.getItem(key);
     const selectedWorkspace = result.workspaces.find(
@@ -379,9 +399,8 @@ export default function App() {
   }
 
   function retrySessionRestore() {
-    setAuthRestoreFailed(false);
-    setAuthRestoreTimedOut(false);
-    setAuthRestoring(true);
+    setAuth(null);
+    setRestorationStatus("restoring");
     setRestoreAttempt(attempt => attempt + 1);
   }
 
@@ -392,6 +411,7 @@ export default function App() {
     setAccessToken(null);
     conversationListRequest.current += 1;
     setAuth(null);
+    setRestorationStatus("unauthenticated");
     window.history.replaceState(null, "", "/login");
     setAuthPage("login");
     setWorkspaceId("");
@@ -446,6 +466,7 @@ export default function App() {
 
   function clearCurrentConversation() {
     activeChatRequest.current?.abort();
+    setWelcomeVisible(true);
     retryableRequest.current = null;
     if (auth && workspaceId) {
       window.sessionStorage.removeItem(
@@ -507,6 +528,7 @@ export default function App() {
         created.id
       );
       setMessages(initial);
+      setWelcomeVisible(false);
       selectView("conversations");
       setRenameId(null);
       setMobileNav(false);
@@ -604,6 +626,7 @@ export default function App() {
       conversation.id
     );
     setMessages(initial);
+    setWelcomeVisible(false);
     setMessagesLoading(true);
     setChatError("");
     setConversationError("");
@@ -611,6 +634,7 @@ export default function App() {
     try {
       const stored: PersistedMessage[] = await getMessages(auth.access_token, conversation.id);
       if (requestId !== conversationRequest.current) return;
+      setWelcomeVisible(false);
       setMessages(stored.length === 0 ? initial : stored.map(message => ({
         id: message.id,
         role: message.role,
@@ -973,24 +997,36 @@ export default function App() {
       ? "Messages are processed by your configured local Ollama runtime."
       : "AI provider information is currently unavailable.";
 
-  if ((authRestoring && authRestoreTimedOut) || (!authRestoring && authRestoreFailed)) {
-    return <main className="auth-page"><section className="auth-card session-restore-error" role="alert">
-      <div className="brand-row auth-brand"><div className="brand-mark"><Sparkles size={19}/></div><span className="brand-name">nexa<span>desk</span></span></div>
-      <p>{authRestoreTimedOut
-        ? "Session restoration is taking longer than expected."
-        : "We couldn't restore your session. Check your connection and try again."}</p>
-      <button type="button" className="auth-submit" onClick={retrySessionRestore}>Retry session restoration</button>
-    </section></main>;
+  if (restorationStatus === "network_error" || restorationStatus === "timed_out") {
+    return <div className="app-shell">
+      <main className="main-panel">
+        <header className="topbar"><div className="topbar-left"><div className="topbar-brand"><span className="brand-mark"><Sparkles size={17}/></span><span className="brand-name">nexa<span>desk</span></span></div></div></header>
+        <section className="public-restore-shell" role="alert">
+          <span className="empty-state-icon"><Sparkles size={25}/></span>
+          <h1>Welcome to NexaDesk</h1>
+          <p>{restorationStatus === "timed_out"
+            ? "Session restoration is taking longer than expected."
+            : "We couldn't restore your session. Check your connection and try again."}</p>
+          <button type="button" className="auth-submit" onClick={retrySessionRestore}>Retry session restoration</button>
+        </section>
+      </main>
+    </div>;
   }
 
-  if (authRestoring) {
-    return <main className="auth-page"><section className="auth-card" role="status">
-      <div className="brand-row auth-brand"><div className="brand-mark"><Sparkles size={19}/></div><span className="brand-name">nexa<span>desk</span></span></div>
-      <p>Restoring your session…</p>
-    </section></main>;
+  if (restorationStatus === "restoring") {
+    return <div className="app-shell">
+      <main className="main-panel">
+        <header className="topbar"><div className="topbar-left"><div className="topbar-brand"><span className="brand-mark"><Sparkles size={17}/></span><span className="brand-name">nexa<span>desk</span></span></div></div></header>
+        <section className="public-restore-shell" role="status" aria-live="polite">
+          <span className="empty-state-icon"><Sparkles size={25}/></span>
+          <h1>Welcome to NexaDesk</h1>
+          <p>Restoring your session…</p>
+        </section>
+      </main>
+    </div>;
   }
 
-  if (!auth) {
+  if (restorationStatus === "unauthenticated" || !auth) {
     return <AuthPage
       page={authPage}
       onNavigate={navigateAuthPage}
@@ -1064,6 +1100,17 @@ export default function App() {
           <div className="topbar-brand"><span className="brand-mark"><Sparkles size={17}/></span><span className="brand-name">nexa<span>desk</span></span></div>
         </div>
         <div className="topbar-actions">
+          <button
+            type="button"
+            className="manage-sources-button"
+            onClick={() => {
+              setActiveView("conversations");
+              clearCurrentConversation();
+              setWelcomeVisible(true);
+            }}
+            disabled={busy || conversationBusy}
+            aria-label="Start a new chat"
+          >+ New chat</button>
           {activeConversation?.chat_type === "knowledge" && activeView === "conversations" && <button
             className="manage-sources-button"
             type="button"
@@ -1102,7 +1149,7 @@ export default function App() {
             <div className={`conversation ${messages.length === 0 && !messagesLoading ? "conversation-empty" : ""}`} role="log" aria-live="polite">
               {messagesLoading
                 ? <p className="history-state" role="status">Loading conversation…</p>
-                : messages.length === 0
+                : messages.length === 0 && welcomeVisible
                   ? <div className="empty-state">
                     <span className="empty-state-icon"><Sparkles size={25}/></span>
                     <h1>Welcome to NexaDesk</h1>
@@ -1148,7 +1195,9 @@ export default function App() {
                       {conversationBusy ? "Starting…" : "Start Chat"}
                     </button>
                   </div>
-                  : messages.map(m => <article className={`message-row ${m.role}`} key={m.id}>
+                  : messages.length === 0
+                    ? <div className="active-empty-chat"><p>Ready when you are.</p></div>
+                    : messages.map(m => <article className={`message-row ${m.role}`} key={m.id}>
                     <div className={`message-avatar ${m.role}`}>{m.role === "assistant" ? <Sparkles size={16}/> : auth.user.email.slice(0, 2).toUpperCase()}</div>
                     <div className="message-body">
                       <div className="message-meta">
@@ -1181,6 +1230,7 @@ export default function App() {
             {conversationError && <div className="chat-error" role="alert">{conversationError}</div>}
             <form className="composer" onSubmit={submit}>
               <textarea
+                ref={textareaRef}
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={e => {
