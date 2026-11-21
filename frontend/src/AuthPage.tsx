@@ -1,13 +1,16 @@
 import { FormEvent, useState } from "react";
 import { Sparkles } from "lucide-react";
-import { ApiError, AuthResult, login, register } from "./lib/api";
+import {
+  ApiError, AuthResult, LoginInstrumentation, login, register
+} from "./lib/api";
+import { recordFrontendPerformance } from "./performance";
 
 export type AuthPageRoute = "login" | "register" | "forgot-password" | "reset-password";
 
 type Props = {
   page: AuthPageRoute;
   onNavigate: (page: AuthPageRoute) => void;
-  onAuthenticated: (result: AuthResult) => void;
+  onAuthenticated: (result: AuthResult, instrumentation?: LoginInstrumentation) => void;
   authMessage?: string;
   onBackToLanding?: () => void;
 };
@@ -46,6 +49,24 @@ export default function AuthPage({
     }
 
     setBusy(true);
+    let loginInstrumentation: LoginInstrumentation | undefined;
+    if (page === "login") {
+      try {
+        loginInstrumentation = {
+          requestId: crypto.randomUUID(),
+          submittedAt: performance.now()
+        };
+      } catch {
+        loginInstrumentation = undefined;
+      }
+    }
+    if (loginInstrumentation) {
+      recordFrontendPerformance(
+        "login_submission_started",
+        undefined,
+        { request_id: loginInstrumentation.requestId }
+      );
+    }
     try {
       if (page === "register") {
         await register(
@@ -59,8 +80,8 @@ export default function AuthPage({
         setNotice("Your account was created. Sign in with your new credentials.");
         onNavigate("login");
       } else {
-        const result = await login(email.trim(), password);
-        onAuthenticated(result);
+        const result = await login(email.trim(), password, loginInstrumentation);
+        onAuthenticated(result, loginInstrumentation);
       }
     } catch (requestError) {
       setError(

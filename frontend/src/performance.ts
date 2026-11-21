@@ -6,6 +6,12 @@ export type FrontendPerformanceStage =
   | "refresh_request_completed"
   | "refresh_request_failed"
   | "authentication_restoration_completed"
+  | "login_submission_started"
+  | "login_request_started"
+  | "login_response_received"
+  | "login_response_parsed"
+  | "login_request_failed"
+  | "dashboard_authentication_completed"
   | "dashboard_interactive"
   | "model_loading_started"
   | "model_loading_completed"
@@ -20,20 +26,26 @@ export type FrontendPerformanceStage =
 export function recordFrontendPerformance(
   stage: FrontendPerformanceStage,
   startedAt?: number,
+  details?: Record<string, string | number>,
 ): void {
-  if (typeof performance === "undefined") return;
+  try {
+    if (typeof performance === "undefined") return;
 
-  const elapsedMs = typeof startedAt === "number"
-    ? Math.round((performance.now() - startedAt) * 100) / 100
-    : undefined;
+    const elapsedMs = typeof startedAt === "number"
+      ? Math.round((performance.now() - startedAt) * 100) / 100
+      : undefined;
 
-  if (stage === "public_shell_rendered" && publicShellStages.has(stage)) return;
-  if (stage === "public_shell_rendered") publicShellStages.add(stage);
+    if (stage === "public_shell_rendered" && publicShellStages.has(stage)) return;
+    if (stage === "public_shell_rendered") publicShellStages.add(stage);
 
-  const event: Record<string, string | number> = {
-    event: "nexadesk_frontend_performance",
-    stage,
-  };
-  if (elapsedMs !== undefined) event.elapsed_ms = elapsedMs;
-  console.info(JSON.stringify(event));
+    const event: Record<string, string | number> = {
+      event: "nexadesk_frontend_performance",
+      stage,
+      ...details,
+    };
+    if (elapsedMs !== undefined) event.elapsed_ms = elapsedMs;
+    console.info(JSON.stringify(event));
+  } catch {
+    // Performance telemetry must not affect application behavior.
+  }
 }

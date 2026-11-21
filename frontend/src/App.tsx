@@ -9,6 +9,7 @@ import {
   ApiError, AuthResult, Conversation, createConversation, deleteConversation,
   cancelChat, getMessages, getModel, KnowledgeDocument, listConversations,
   listKnowledgeDocuments, logout, ModelInfo, PersistedMessage,
+  LoginInstrumentation,
   refreshSession, retryRefreshSession, setAccessToken,
   renameConversation, SourceReference, StreamMilestone, streamChat,
   updateConversationDocuments
@@ -123,6 +124,8 @@ export default function App() {
   const sidebarRef = useRef<HTMLElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dashboardInteractiveRecorded = useRef(false);
+  const pendingLoginInstrumentation = useRef<LoginInstrumentation | null>(null);
+  const loginRequestId = useRef<string | null>(null);
   const activeChatRequest = useRef<AbortController | null>(null);
   const activeRequestId = useRef<string | null>(null);
   const stopRequested = useRef(false);
@@ -232,6 +235,8 @@ export default function App() {
       .catch(error => {
         if (!active || restorationGeneration.current !== generation) return;
         setAccessToken(null);
+        pendingLoginInstrumentation.current = null;
+        loginRequestId.current = null;
         setAuth(null);
         recordFrontendPerformance("authentication_restoration_completed", restorationStartedAt);
         setRestorationStatus(current => {
@@ -258,11 +263,28 @@ export default function App() {
   }, [restoreAttempt]);
 
   useEffect(() => {
-    if (!auth || restorationStatus !== "authenticated" || dashboardInteractiveRecorded.current) return;
+    if (!auth || restorationStatus !== "authenticated") return;
+    if (
+      dashboardInteractiveRecorded.current &&
+      !pendingLoginInstrumentation.current
+    ) return;
     const frame = window.requestAnimationFrame(() => {
+      const loginTiming = pendingLoginInstrumentation.current;
+      if (loginTiming) {
+        recordFrontendPerformance(
+          "dashboard_authentication_completed",
+          loginTiming.submittedAt,
+          { request_id: loginTiming.requestId }
+        );
+        pendingLoginInstrumentation.current = null;
+      }
       if (dashboardInteractiveRecorded.current) return;
       dashboardInteractiveRecorded.current = true;
-      recordFrontendPerformance("dashboard_interactive");
+      recordFrontendPerformance(
+        "dashboard_interactive",
+        loginTiming?.submittedAt,
+        loginTiming ? { request_id: loginTiming.requestId } : undefined
+      );
     });
     return () => window.cancelAnimationFrame(frame);
   }, [auth, restorationStatus]);
@@ -275,13 +297,20 @@ export default function App() {
     }
     let active = true;
     const loadingStartedAt = performance.now();
-    recordFrontendPerformance("model_loading_started");
+    const loginRequestIdForLoad = loginRequestId.current;
+    const loginTiming = loginRequestIdForLoad
+      ? { login_request_id: loginRequestIdForLoad }
+      : undefined;
+    recordFrontendPerformance("model_loading_started", undefined, loginTiming);
     setModelInfo(null);
     setModelInfoUnavailable(false);
     void getModel(auth.access_token)
       .then(info => {
         if (!active) return;
-        recordFrontendPerformance("model_loading_completed", loadingStartedAt);
+        recordFrontendPerformance("model_loading_completed", loadingStartedAt, loginTiming);
+        if (loginRequestId.current === loginRequestIdForLoad) {
+          loginRequestId.current = null;
+        }
         if (
           typeof info.provider !== "string" || !info.provider.trim() ||
           typeof info.model !== "string" || !info.model.trim()
@@ -293,7 +322,10 @@ export default function App() {
       })
       .catch(error => {
         if (!active) return;
-        recordFrontendPerformance("model_loading_failed", loadingStartedAt);
+        recordFrontendPerformance("model_loading_failed", loadingStartedAt, loginTiming);
+        if (loginRequestId.current === loginRequestIdForLoad) {
+          loginRequestId.current = null;
+        }
         if (error instanceof ApiError && error.status === 401) {
           if (active) expireSession(error);
           return;
@@ -355,20 +387,30 @@ export default function App() {
     }
     let active = true;
     const loadingStartedAt = performance.now();
-    recordFrontendPerformance("documents_loading_started");
+    const loginRequestIdForLoad = loginRequestId.current;
+    const loginTiming = loginRequestIdForLoad
+      ? { login_request_id: loginRequestIdForLoad }
+      : undefined;
+    recordFrontendPerformance("documents_loading_started", undefined, loginTiming);
     setKnowledgeDocuments([]);
     setKnowledgeLoading(true);
     setKnowledgeError("");
     void listKnowledgeDocuments(auth.access_token, workspaceId)
       .then(documents => {
         if (active) {
-          recordFrontendPerformance("documents_loading_completed", loadingStartedAt);
+          recordFrontendPerformance("documents_loading_completed", loadingStartedAt, loginTiming);
+          if (loginRequestId.current === loginRequestIdForLoad) {
+            loginRequestId.current = null;
+          }
           setKnowledgeDocuments(documents);
         }
       })
       .catch(error => {
         if (!active) return;
-        recordFrontendPerformance("documents_loading_failed", loadingStartedAt);
+        recordFrontendPerformance("documents_loading_failed", loadingStartedAt, loginTiming);
+        if (loginRequestId.current === loginRequestIdForLoad) {
+          loginRequestId.current = null;
+        }
         if (error instanceof ApiError && error.status === 401) {
           expireSession(error);
           return;
@@ -387,6 +429,8 @@ export default function App() {
   function expireSession(error: ApiError) {
     activeChatRequest.current?.abort();
     conversationListRequest.current += 1;
+    pendingLoginInstrumentation.current = null;
+    loginRequestId.current = null;
     setAccessToken(null);
     setAuth(null);
     window.localStorage.removeItem(SESSION_HINT_KEY);
@@ -422,8 +466,13 @@ export default function App() {
     setAuthError("");
   }
 
-  function acceptLogin(result: AuthResult) {
+  function acceptLogin(
+    result: AuthResult,
+    instrumentation?: LoginInstrumentation
+  ) {
     invalidateSessionRestoration();
+    pendingLoginInstrumentation.current = instrumentation ?? null;
+    loginRequestId.current = instrumentation?.requestId ?? null;
     setWelcomeVisible(true);
     setAccessToken(result.access_token);
     setAuth(result);
@@ -521,14 +570,21 @@ export default function App() {
     }
     let active = true;
     const loadingStartedAt = performance.now();
-    recordFrontendPerformance("conversations_loading_started");
+    const loginRequestIdForLoad = loginRequestId.current;
+    const loginTiming = loginRequestIdForLoad
+      ? { login_request_id: loginRequestIdForLoad }
+      : undefined;
+    recordFrontendPerformance("conversations_loading_started", undefined, loginTiming);
     const requestId = ++conversationListRequest.current;
     setConversationsLoading(true);
     setConversationError("");
     void listConversations(auth.access_token, workspaceId)
       .then(items => {
         if (active && requestId === conversationListRequest.current) {
-          recordFrontendPerformance("conversations_loading_completed", loadingStartedAt);
+          recordFrontendPerformance("conversations_loading_completed", loadingStartedAt, loginTiming);
+          if (loginRequestId.current === loginRequestIdForLoad) {
+            loginRequestId.current = null;
+          }
           setConversations(items);
           const savedId = window.sessionStorage.getItem(
             conversationStorageKey(auth.user.id, workspaceId)
@@ -545,7 +601,10 @@ export default function App() {
       })
       .catch(error => {
         if (!active || requestId !== conversationListRequest.current) return;
-        recordFrontendPerformance("conversations_loading_failed", loadingStartedAt);
+        recordFrontendPerformance("conversations_loading_failed", loadingStartedAt, loginTiming);
+        if (loginRequestId.current === loginRequestIdForLoad) {
+          loginRequestId.current = null;
+        }
         if (error instanceof ApiError && error.status === 401) {
           expireSession(error);
         } else {

@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
+import logging
 import secrets
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
@@ -17,6 +19,7 @@ from app.core.config import Settings
 from app.core.security import create_access_token
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
+from app.services import performance as performance_service
 from app.services.auth import create_refresh_token, rotate_refresh_token
 
 
@@ -76,6 +79,76 @@ def test_duplicate_registration_and_login(client):
     assert "nexadesk_refresh=" in valid.headers["set-cookie"]
     assert "httponly" in valid.headers["set-cookie"].lower()
     assert "samesite=lax" in valid.headers["set-cookie"].lower()
+
+
+def test_login_emits_correlated_timing_without_sensitive_data(client, caplog):
+    assert register(client).status_code == 201
+    request_id = str(uuid4())
+
+    with caplog.at_level(logging.INFO, logger="app.auth.performance"):
+        response = client.post(
+            "/api/v1/auth/login",
+            headers={"X-Request-ID": request_id},
+            json={
+                "email": "owner@example.com",
+                "password": "correct horse battery staple",
+            },
+        )
+
+    assert response.status_code == 200
+    events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "app.auth.performance"
+    ]
+    assert {event["stage"] for event in events} == {
+        "request_received",
+        "user_lookup_completed",
+        "password_verification_completed",
+        "refresh_token_created",
+        "refresh_token_committed",
+        "workspace_memberships_lookup_completed",
+        "login_request_completed",
+    }
+    assert all(event["request_id"] == request_id for event in events)
+    assert any(
+        event["stage"] == "login_request_completed" and
+        isinstance(event.get("duration_ms"), (int, float))
+        for event in events
+    )
+    assert "correct horse battery staple" not in caplog.text
+    assert "owner@example.com" not in caplog.text
+    assert "$argon2" not in caplog.text
+
+
+def test_login_commits_refresh_token_and_sets_cookie_when_logger_raises(
+    client, test_session_factory, monkeypatch
+):
+    assert register(client).status_code == 201
+
+    def fail_logging(*_args, **_kwargs):
+        raise OSError("telemetry sink unavailable")
+
+    monkeypatch.setattr(performance_service._auth_logger, "info", fail_logging)
+    response = client.post(
+        "/api/v1/auth/login",
+        headers={"X-Request-ID": str(uuid4())},
+        json={
+            "email": "owner@example.com",
+            "password": "correct horse battery staple",
+        },
+    )
+
+    assert response.status_code == 200
+    refresh_token = response.cookies.get("nexadesk_refresh")
+    assert refresh_token
+    token_hash = hashlib.sha256(refresh_token.encode("utf-8")).hexdigest()
+    with test_session_factory() as db:
+        token_record = db.scalar(
+            select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+        )
+    assert token_record is not None
+    assert token_record.revoked_at is None
 
 
 def test_refresh_rotates_tokens_and_duplicate_refresh_reuses_the_rotation(

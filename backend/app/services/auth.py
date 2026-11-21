@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import secrets
+import time
 from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
@@ -17,6 +18,7 @@ from app.core.security import (
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
 from app.models.workspace import Workspace, WorkspaceMembership
+from app.services.performance import log_auth_stage
 
 _REFRESH_ROTATION_GRACE_SECONDS = 30
 
@@ -49,13 +51,30 @@ def register_user(
 
 
 def authenticate_user(
-    db: Session, email: str, password: str
+    db: Session, email: str, password: str, request_id: str | None = None
 ) -> tuple[User | None, bool]:
+    lookup_started_at = time.perf_counter()
     user = db.scalar(select(User).where(User.email == email.strip().lower()))
+    log_auth_stage("user_lookup_completed", lookup_started_at, request_id)
     if user is None:
+        verification_started_at = time.perf_counter()
         verify_unknown_user_password(password)
+        log_auth_stage(
+            "password_verification_completed",
+            verification_started_at,
+            request_id,
+        )
         return None, False
-    if not user.is_active or not verify_password(password, user.password_hash):
+    if not user.is_active:
+        return None, True
+    verification_started_at = time.perf_counter()
+    password_valid = verify_password(password, user.password_hash)
+    log_auth_stage(
+        "password_verification_completed",
+        verification_started_at,
+        request_id,
+    )
+    if not password_valid:
         return None, True
     return user, True
 

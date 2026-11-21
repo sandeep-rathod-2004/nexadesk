@@ -808,6 +808,32 @@ describe("conversation management UI", () => {
     ));
   });
 
+  it("records dashboard authentication completion with the login request ID", async () => {
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    await signIn(userEvent.setup(), false);
+
+    await waitFor(() => {
+      const events = consoleInfo.mock.calls.map(([message]) =>
+        JSON.parse(String(message)) as Record<string, unknown>
+      );
+      expect(events.some(event =>
+        event.stage === "dashboard_authentication_completed" &&
+        typeof event.request_id === "string"
+      )).toBe(true);
+    });
+  });
+
+  it("completes the dashboard login flow when console performance logging throws", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => {
+      throw new Error("console unavailable");
+    });
+
+    await signIn(userEvent.setup(), false);
+
+    expect(api.login).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
+  });
+
   it("renders a public landing immediately and does not refresh for a first-time visitor", async () => {
     window.history.replaceState(null, "", "/");
     window.localStorage.removeItem("nexadesk.session.present");

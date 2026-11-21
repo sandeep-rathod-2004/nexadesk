@@ -89,6 +89,26 @@ let refreshInFlight: Promise<AuthResult> | null = null;
 let refreshAbortController: AbortController | null = null;
 const REFRESH_REQUEST_TIMEOUT_MS = 10_000;
 
+export type LoginInstrumentation = {
+  requestId: string;
+  submittedAt: number;
+};
+
+type RequestTiming = {
+  onRequestStarted?: (startedAt: number) => void;
+  onResponseReceived?: (receivedAt: number) => void;
+  onResponseParsed?: (parsedAt: number) => void;
+};
+
+function notifyTiming(callback?: (at: number) => void): void {
+  if (!callback) return;
+  try {
+    callback(performance.now());
+  } catch {
+    // Timing callbacks are best-effort and must not affect API requests.
+  }
+}
+
 export function setAccessToken(token: string | null): void {
   sessionAccessToken = token;
 }
@@ -138,7 +158,8 @@ export async function retryRefreshSession(): Promise<AuthResult> {
 async function fetchWithSession(
   url: string,
   init: RequestInit,
-  token?: string
+  token?: string,
+  onRequestStarted?: (startedAt: number) => void
 ): Promise<Response> {
   const activeToken = token ? sessionAccessToken ?? token : undefined;
   const headers: Record<string, string> = {};
@@ -150,6 +171,7 @@ async function fetchWithSession(
     delete headers.Authorization;
     headers.Authorization = `Bearer ${activeToken}`;
   }
+  notifyTiming(onRequestStarted);
   const response = await fetch(url, {
     ...init,
     headers,
@@ -185,19 +207,24 @@ async function request<T>(
     method?: string;
     body?: unknown;
     signal?: AbortSignal;
+    requestId?: string;
+    timing?: RequestTiming;
   } = {}
 ): Promise<T> {
   const headers: Record<string, string> = {};
   if (options.body !== undefined) headers["Content-Type"] = "application/json";
   if (options.token) headers.Authorization = `Bearer ${options.token}`;
+  if (options.requestId) headers["X-Request-ID"] = options.requestId;
   const response = await fetchWithSession(`${API_BASE}${path}`, {
     method: options.method ?? "GET",
     headers,
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
     signal: options.signal
-  }, options.token);
+  }, options.token, options.timing?.onRequestStarted);
+  notifyTiming(options.timing?.onResponseReceived);
   if (response.status === 204) return undefined as T;
   const payload: unknown = await response.json().catch(() => undefined);
+  notifyTiming(options.timing?.onResponseParsed);
   if (!response.ok) {
     const detail =
       typeof payload === "object" && payload !== null && "detail" in payload &&
@@ -232,11 +259,63 @@ export function register(
   });
 }
 
-export async function login(email: string, password: string): Promise<AuthResult> {
-  const result = await request<AuthResult>("/auth/login", {
-    method: "POST",
-    body: { email, password }
-  });
+export async function login(
+  email: string,
+  password: string,
+  instrumentation?: LoginInstrumentation
+): Promise<AuthResult> {
+  let requestStartedAt: number | undefined;
+  let responseReceivedAt: number | undefined;
+  const requestIdDetails = instrumentation
+    ? { request_id: instrumentation.requestId }
+    : undefined;
+  let result: AuthResult;
+  try {
+    result = await request<AuthResult>("/auth/login", {
+      method: "POST",
+      body: { email, password },
+      requestId: instrumentation?.requestId,
+      timing: instrumentation ? {
+        onRequestStarted: startedAt => {
+          requestStartedAt = startedAt;
+          recordFrontendPerformance(
+            "login_request_started",
+            instrumentation.submittedAt,
+            requestIdDetails
+          );
+        },
+        onResponseReceived: receivedAt => {
+          responseReceivedAt = receivedAt;
+          recordFrontendPerformance(
+            "login_response_received",
+            requestStartedAt,
+            requestIdDetails
+          );
+        },
+        onResponseParsed: parsedAt => {
+          recordFrontendPerformance(
+            "login_response_parsed",
+            responseReceivedAt,
+            {
+              ...requestIdDetails,
+              total_request_elapsed_ms: requestStartedAt === undefined
+                ? 0
+                : Math.round((parsedAt - requestStartedAt) * 100) / 100
+            }
+          );
+        }
+      } : undefined
+    });
+  } catch (error) {
+    if (instrumentation && requestStartedAt !== undefined) {
+      recordFrontendPerformance(
+        "login_request_failed",
+        requestStartedAt,
+        requestIdDetails
+      );
+    }
+    throw error;
+  }
   setAccessToken(result.access_token);
   return result;
 }

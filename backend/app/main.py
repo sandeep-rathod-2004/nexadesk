@@ -2,6 +2,7 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager
+from uuid import uuid4
 
 import httpx
 from fastapi import FastAPI
@@ -24,7 +25,7 @@ from app.services.gemini_provider import (
     create_gemini_client,
     set_shared_gemini_client,
 )
-from app.services.performance import request_id_for_log
+from app.services.performance import log_auth_stage, request_id_for_log
 
 settings = get_settings()
 
@@ -112,6 +113,14 @@ async def ready():
 async def log_request_start(request, call_next):
     request.state.request_received_at = time.perf_counter()
     request_id = request_id_for_log(request.headers.get("x-request-id"))
+    login_path = f"{settings.api_v1_prefix.rstrip('/')}/auth/login"
+    is_login_request = request.url.path == login_path
+    login_started_at = None
+    if is_login_request:
+        request_id = request_id or str(uuid4())
+        request.state.auth_request_id = request_id
+        login_started_at = time.perf_counter()
+        log_auth_stage("request_received", request_id=request_id)
     if request.url.path.endswith("/chat/stream"):
         logging.getLogger("app.chat.performance").info(
             json.dumps(
@@ -123,7 +132,15 @@ async def log_request_start(request, call_next):
                 separators=(",", ":"),
             )
         )
-    return await call_next(request)
+    try:
+        return await call_next(request)
+    finally:
+        if is_login_request and login_started_at is not None:
+            log_auth_stage(
+                "login_request_completed",
+                login_started_at,
+                request_id,
+            )
 
 
 # Wrapping the complete FastAPI app also adds CORS headers to generated error responses.

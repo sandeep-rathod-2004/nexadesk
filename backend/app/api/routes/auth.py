@@ -1,3 +1,5 @@
+import time
+
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -23,12 +25,16 @@ from app.services.auth import (
     revoke_refresh_token,
     rotate_refresh_token,
 )
+from app.services.performance import log_auth_stage
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 _REFRESH_COOKIE = "nexadesk_refresh"
 
 
-def _workspace_accesses(db: Session, user: User) -> list[WorkspaceAccess]:
+def _workspace_accesses(
+    db: Session, user: User, request_id: str | None = None
+) -> list[WorkspaceAccess]:
+    lookup_started_at = time.perf_counter()
     rows = db.execute(
         select(Workspace, WorkspaceMembership.role)
         .join(
@@ -38,13 +44,21 @@ def _workspace_accesses(db: Session, user: User) -> list[WorkspaceAccess]:
         .where(WorkspaceMembership.user_id == user.id)
         .order_by(Workspace.created_at, Workspace.id)
     )
-    return [
+    workspaces = [
         WorkspaceAccess(id=workspace.id, name=workspace.name, role=role)
         for workspace, role in rows
     ]
+    log_auth_stage(
+        "workspace_memberships_lookup_completed",
+        lookup_started_at,
+        request_id,
+    )
+    return workspaces
 
 
-def _auth_response(db: Session, user: User) -> AuthResponse:
+def _auth_response(
+    db: Session, user: User, request_id: str | None = None
+) -> AuthResponse:
     return AuthResponse(
         access_token=create_access_token(user.id),
         user=UserResponse(
@@ -52,7 +66,7 @@ def _auth_response(db: Session, user: User) -> AuthResponse:
             email=user.email,
             full_name=user.full_name,
         ),
-        workspaces=_workspace_accesses(db, user),
+        workspaces=_workspace_accesses(db, user, request_id),
     )
 
 
@@ -121,12 +135,14 @@ def register(body: RegisterRequest, db: DbSession) -> RegistrationResponse:
 
 @router.post("/login", response_model=AuthResponse)
 def login(
-    body: LoginRequest, response: Response, db: DbSession
+    body: LoginRequest, request: Request, response: Response, db: DbSession
 ) -> AuthResponse:
+    request_id = getattr(request.state, "auth_request_id", None)
     user, email_registered = authenticate_user(
         db,
         str(body.email),
         body.password.get_secret_value(),
+        request_id=request_id,
     )
     if user is None:
         raise HTTPException(
@@ -138,10 +154,14 @@ def login(
             ),
             headers={"WWW-Authenticate": "Bearer"},
         )
+    token_started_at = time.perf_counter()
     refresh_token = create_refresh_token(db, user)
+    log_auth_stage("refresh_token_created", token_started_at, request_id)
+    commit_started_at = time.perf_counter()
     db.commit()
+    log_auth_stage("refresh_token_committed", commit_started_at, request_id)
     _set_refresh_cookie(response, refresh_token)
-    return _auth_response(db, user)
+    return _auth_response(db, user, request_id)
 
 
 @router.post("/refresh", response_model=AuthResponse)

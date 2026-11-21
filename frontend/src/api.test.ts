@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as performanceInstrumentation from "./performance";
 import {
   ApiError,
   cancelChat,
@@ -6,6 +7,7 @@ import {
   deleteKnowledgeDocument,
   deleteConversation,
   getModel,
+  login,
   listKnowledgeDocuments,
   listConversations,
   renameConversation,
@@ -31,6 +33,81 @@ afterEach(() => {
 });
 
 describe("conversation API client", () => {
+  it("times and correlates login without logging credentials or tokens", async () => {
+    const requestId = "00000000-0000-4000-8000-000000000001";
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      access_token: "sensitive-access-token",
+      token_type: "bearer",
+      user: { id: "user-1", email: "private@example.com" },
+      workspaces: []
+    }), { status: 200 }));
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await login("private@example.com", "sensitive-password", {
+      requestId,
+      submittedAt: performance.now()
+    });
+
+    expect(fetchMock.mock.calls[0]?.[1]?.headers).toMatchObject({
+      "x-request-id": requestId
+    });
+    const events = consoleInfo.mock.calls.map(([message]) =>
+      JSON.parse(String(message)) as Record<string, unknown>
+    );
+    expect(events.map(event => event.stage)).toEqual([
+      "login_request_started",
+      "login_response_received",
+      "login_response_parsed"
+    ]);
+    expect(events.every(event => event.request_id === requestId)).toBe(true);
+    expect(JSON.stringify(events)).not.toContain("private@example.com");
+    expect(JSON.stringify(events)).not.toContain("sensitive-password");
+    expect(JSON.stringify(events)).not.toContain("sensitive-access-token");
+  });
+
+  it("completes login when console performance logging throws", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      access_token: "successful-access-token",
+      token_type: "bearer",
+      user: { id: "user-1", email: "private@example.com" },
+      workspaces: []
+    }), { status: 200 }));
+    vi.spyOn(console, "info").mockImplementation(() => {
+      throw new Error("console unavailable");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(login("private@example.com", "password", {
+      requestId: "00000000-0000-4000-8000-000000000001",
+      submittedAt: performance.now()
+    })).resolves.toMatchObject({ access_token: "successful-access-token" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores timing callback failures before and after the request", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      access_token: "successful-access-token",
+      token_type: "bearer",
+      user: { id: "user-1", email: "private@example.com" },
+      workspaces: []
+    }), { status: 200 }));
+    const timingSpy = vi.spyOn(
+      performanceInstrumentation,
+      "recordFrontendPerformance"
+    ).mockImplementation(() => {
+      throw new Error("timing callback failed");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(login("private@example.com", "password", {
+      requestId: "00000000-0000-4000-8000-000000000002",
+      submittedAt: performance.now()
+    })).resolves.toMatchObject({ access_token: "successful-access-token" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(timingSpy).toHaveBeenCalled();
+  });
+
   it("shares one in-flight session restoration request", async () => {
     let resolveResponse: ((response: Response) => void) | undefined;
     const fetchMock = vi.fn((_input: RequestInfo | URL, _init?: RequestInit) =>
