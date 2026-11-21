@@ -30,10 +30,17 @@ type Message = {
 const initial: Message[] = [];
 const SESSION_RESTORE_TIMEOUT_MS = 10_000;
 const SESSION_HINT_KEY = "nexadesk.session.present";
-type RestorationStatus = "public" | "restoring" | "authenticated" | "unauthenticated" | "network_error" | "timed_out";
+type RestorationStatus =
+  | "public"
+  | "restoring"
+  | "authenticated"
+  | "unauthenticated"
+  | "network_error"
+  | "server_error"
+  | "timed_out";
 
 function authPageFromPath(pathname: string): AuthPageRoute {
-  if (pathname === "/register") return "register";
+  if (pathname === "/register" || pathname === "/signup") return "register";
   if (pathname === "/forgot-password") return "forgot-password";
   if (pathname === "/reset-password") return "reset-password";
   return "login";
@@ -150,8 +157,12 @@ export default function App() {
     return () => window.cancelAnimationFrame(frame);
   }, []);
 
+  const restorationGeneration = useRef(0);
+  const restorationInFlight = useRef(false);
+
   useEffect(() => {
     const handlePopState = () => {
+      invalidateSessionRestoration();
       setAuthPage(authPageFromPath(window.location.pathname));
       setAuthPageVisible(window.location.pathname !== "/");
     };
@@ -174,8 +185,6 @@ export default function App() {
     };
   }, []);
 
-  const restorationGeneration = useRef(0);
-
   useEffect(() => {
     let active = true;
 
@@ -188,10 +197,12 @@ export default function App() {
 
     const restorationStartedAt = performance.now();
     const generation = ++restorationGeneration.current;
+    restorationInFlight.current = true;
     setRestorationStatus("restoring");
     const timeoutId = window.setTimeout(() => {
       if (active && restorationGeneration.current === generation) {
         setRestorationStatus("timed_out");
+        restorationInFlight.current = false;
       }
     }, SESSION_RESTORE_TIMEOUT_MS);
     void (restoreAttempt === 0 ? refreshSession() : retryRefreshSession())
@@ -213,7 +224,7 @@ export default function App() {
             ? "knowledge"
             : "conversations"
         );
-        if (["/login", "/register", "/forgot-password", "/reset-password"]
+        if (["/login", "/register", "/signup", "/forgot-password", "/reset-password"]
           .includes(window.location.pathname)) {
           window.history.replaceState(null, "", "/");
         }
@@ -226,14 +237,19 @@ export default function App() {
         setRestorationStatus(current => {
           if (error instanceof ApiError && error.status === 401) {
             window.localStorage.removeItem(SESSION_HINT_KEY);
-            return "public";
+            return "unauthenticated";
           }
           if (current === "timed_out") return "timed_out";
+          if (error instanceof ApiError && error.status >= 500) return "server_error";
+          if (error instanceof DOMException && error.name === "AbortError") return "timed_out";
           return "network_error";
         });
       })
       .finally(() => {
         window.clearTimeout(timeoutId);
+        if (restorationGeneration.current === generation) {
+          restorationInFlight.current = false;
+        }
       });
     return () => {
       active = false;
@@ -390,7 +406,16 @@ export default function App() {
     setAuthError(error.message);
   }
 
+  function invalidateSessionRestoration() {
+    restorationGeneration.current += 1;
+    restorationInFlight.current = false;
+    if (restorationStatus === "restoring") {
+      setRestorationStatus("public");
+    }
+  }
+
   function navigateAuthPage(page: AuthPageRoute) {
+    invalidateSessionRestoration();
     window.history.pushState(null, "", authPath(page));
     setAuthPage(page);
     setAuthPageVisible(true);
@@ -398,6 +423,7 @@ export default function App() {
   }
 
   function acceptLogin(result: AuthResult) {
+    invalidateSessionRestoration();
     setWelcomeVisible(true);
     setAccessToken(result.access_token);
     setAuth(result);
@@ -459,7 +485,10 @@ export default function App() {
   }
 
   function retrySessionRestore() {
+    if (restorationInFlight.current) return;
+    restorationInFlight.current = true;
     setAuth(null);
+    setAuthError("");
     setAuthPageVisible(false);
     setRestorationStatus("restoring");
     setRestoreAttempt(attempt => attempt + 1);
@@ -1072,6 +1101,7 @@ export default function App() {
         onAuthenticated={acceptLogin}
         authMessage={authError}
         onBackToLanding={() => {
+          invalidateSessionRestoration();
           setAuthPageVisible(false);
           window.history.replaceState(null, "", "/");
         }}
@@ -1081,32 +1111,141 @@ export default function App() {
     return <div className="app-shell">
       <main className="main-panel public-main-panel">
         <header className="topbar public-topbar">
-          <div className="topbar-left">
-            <div className="topbar-brand"><span className="brand-mark"><Sparkles size={17}/></span><span className="brand-name">nexa<span>desk</span></span></div>
-          </div>
-          <div className="public-topbar-actions">
-            <button type="button" className="public-login-button" onClick={() => {
-              setAuthPage("login");
-              setAuthPageVisible(true);
-              window.history.pushState(null, "", "/login");
-            }}>Login</button>
-            <button type="button" className="public-signup-button" onClick={() => {
-              setAuthPage("register");
-              setAuthPageVisible(true);
-              window.history.pushState(null, "", "/register");
-            }}>Sign Up</button>
-          </div>
+          <a className="public-brand" href="/" onClick={event => {
+            event.preventDefault();
+            invalidateSessionRestoration();
+            setAuthPageVisible(false);
+            window.history.pushState(null, "", "/");
+          }}>
+            <span className="brand-mark"><Sparkles size={17}/></span>
+            <span className="brand-name">nexa<span>desk</span></span>
+          </a>
+          <nav className="public-topbar-actions" aria-label="Main navigation">
+            <a className="public-nav-link" href="#features">Features</a>
+            <button type="button" className="public-login-button" onClick={() => navigateAuthPage("login")}>Login</button>
+            <button type="button" className="public-signup-button" onClick={() => navigateAuthPage("register")}>Sign Up</button>
+          </nav>
         </header>
-        <section className="public-landing" role="region" aria-label="NexaDesk public welcome">
-          <span className="empty-state-icon"><Sparkles size={25}/></span>
-          <h1>Welcome to NexaDesk</h1>
-          <p className="public-landing-subtitle">Your AI workspace for conversations, documents, and knowledge.</p>
-          {restorationStatus === "network_error" && <p className="public-state-message" role="alert">We couldn't restore your session. Check your connection and try again.</p>}
-          {restorationStatus === "timed_out" && <p className="public-state-message" role="alert">Session restoration is taking longer than expected.</p>}
-          {restorationStatus === "public" && <button type="button" className="public-restore-button" onClick={retrySessionRestore}>Restore existing session</button>}
-          {(restorationStatus === "network_error" || restorationStatus === "timed_out") && <button type="button" className="auth-submit" onClick={retrySessionRestore}>Retry session restoration</button>}
-          {restorationStatus === "restoring" && <p className="public-state-message" role="status" aria-live="polite">Restoring your session…</p>}
-        </section>
+        <div className="landing-content">
+          <section className="landing-hero" aria-labelledby="landing-title">
+            <div className="landing-copy">
+              <span className="landing-kicker"><span/> A clearer way to work with AI</span>
+              <h1 id="landing-title">One Workspace.<br/><span>Infinite Possibilities.</span></h1>
+              <p className="landing-description">
+                Bring everyday AI conversations and your trusted documents together in one
+                secure workspace—so ideas, knowledge, and work stay connected.
+              </p>
+              <div className="landing-actions">
+                <button type="button" className="landing-primary-cta" onClick={() => navigateAuthPage("register")}>
+                  Get Started <ArrowUp size={16} className="landing-cta-arrow"/>
+                </button>
+                <button
+                  type="button"
+                  className="landing-secondary-cta"
+                  onClick={retrySessionRestore}
+                  disabled={restorationStatus === "restoring"}
+                  aria-busy={restorationStatus === "restoring"}
+                  aria-live="polite"
+                >
+                  {restorationStatus === "restoring"
+                    ? <><span className="landing-spinner" aria-hidden="true"/> Checking your session…</>
+                    : <><LockKeyhole size={15}/> Restore Existing Session</>}
+                </button>
+              </div>
+              {restorationStatus === "unauthenticated" && <div className="landing-session-message" role="alert">
+                <span>No active session found. Please log in to continue.</span>
+                <button type="button" onClick={() => navigateAuthPage("login")}>Log in</button>
+              </div>}
+              {restorationStatus === "network_error" && <div className="landing-session-message" role="alert">
+                <span>We couldn’t reach NexaDesk. Check your connection and try again.</span>
+                <button type="button" onClick={retrySessionRestore}>Retry</button>
+              </div>}
+              {restorationStatus === "server_error" && <div className="landing-session-message" role="alert">
+                <span>Session restoration is temporarily unavailable.</span>
+                <button type="button" onClick={retrySessionRestore}>Retry</button>
+              </div>}
+              {restorationStatus === "timed_out" && <div className="landing-session-message" role="alert">
+                <span>Session check timed out. Please try again.</span>
+                <button type="button" onClick={retrySessionRestore}>Retry</button>
+              </div>}
+              <div className="landing-assurance"><LockKeyhole size={14}/> Your workspace stays private and protected.</div>
+            </div>
+            <div className="landing-preview" aria-label="NexaDesk workspace preview">
+              <div className="preview-glow"/>
+              <div className="preview-window">
+                <div className="preview-titlebar">
+                  <div className="preview-window-dots"><i/><i/><i/></div>
+                  <span>NexaDesk <b>/</b> Workspace</span>
+                  <span className="preview-secure"><LockKeyhole size={12}/> Private</span>
+                </div>
+                <div className="preview-body">
+                  <aside className="preview-sidebar" aria-hidden="true">
+                    <span className="preview-mini-brand"><span className="brand-mark"><Sparkles size={12}/></span> nexa<span>desk</span></span>
+                    <span className="preview-nav-active"><MessageSquare size={13}/> Conversations</span>
+                    <span className="preview-nav-item"><BookOpen size={13}/> Knowledge base</span>
+                    <span className="preview-sidebar-label">YOUR WORKSPACE</span>
+                    <span className="preview-skeleton-line"/>
+                    <span className="preview-skeleton-line short"/>
+                  </aside>
+                  <div className="preview-main">
+                    <span className="preview-eyebrow">YOUR AI WORKSPACE</span>
+                    <h2>Think, explore,<br/>and create.</h2>
+                    <p>Start a conversation or bring your documents into the picture.</p>
+                    <div className="preview-mode-row">
+                      <span><MessageSquare size={15}/> AI Conversations</span>
+                      <span><BookOpen size={15}/> Knowledge Chat</span>
+                    </div>
+                    <div className="preview-composer"><span>Ask a question or explore an idea…</span><span className="preview-send"><ArrowUp size={13}/></span></div>
+                  </div>
+                </div>
+              </div>
+              <div className="preview-float-chip"><FileText size={14}/> Your knowledge, in context</div>
+            </div>
+          </section>
+          <section className="landing-features" id="features" aria-labelledby="features-title">
+            <div className="landing-section-heading">
+              <span className="landing-kicker">BUILT FOR HOW YOU WORK</span>
+              <h2 id="features-title">Everything you need. Nothing you don’t.</h2>
+              <p>Practical AI tools that work together, grounded in your own workspace.</p>
+            </div>
+            <div className="landing-feature-grid">
+              <article className="landing-feature-card">
+                <span className="landing-feature-icon purple"><MessageSquare size={19}/></span>
+                <h3>AI Conversations</h3>
+                <p>Draft, reason, and solve everyday tasks with a focused AI chat experience.</p>
+              </article>
+              <article className="landing-feature-card">
+                <span className="landing-feature-icon blue"><BookOpen size={19}/></span>
+                <h3>Knowledge Chat</h3>
+                <p>Ask questions against the documents you choose for each conversation.</p>
+              </article>
+              <article className="landing-feature-card">
+                <span className="landing-feature-icon teal"><FileText size={19}/></span>
+                <h3>Document Intelligence</h3>
+                <p>Upload supported files, organize workspace knowledge, and explore cited answers.</p>
+              </article>
+              <article className="landing-feature-card">
+                <span className="landing-feature-icon violet"><LockKeyhole size={19}/></span>
+                <h3>Workspace Security</h3>
+                <p>Keep conversations and knowledge scoped to your authenticated workspace.</p>
+              </article>
+            </div>
+          </section>
+          <footer className="landing-footer">
+            <a className="public-brand footer-brand" href="/" onClick={event => {
+              event.preventDefault();
+              invalidateSessionRestoration();
+              setAuthPageVisible(false);
+              window.history.pushState(null, "", "/");
+            }}><span className="brand-mark"><Sparkles size={15}/></span><span className="brand-name">nexa<span>desk</span></span></a>
+            <span>AI conversations and knowledge, together.</span>
+            <nav aria-label="Footer navigation">
+              <a href="#features">Features</a>
+              <button type="button" onClick={() => navigateAuthPage("login")}>Login</button>
+              <button type="button" onClick={() => navigateAuthPage("register")}>Sign Up</button>
+            </nav>
+          </footer>
+        </div>
       </main>
     </div>;
   }

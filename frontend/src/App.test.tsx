@@ -814,10 +814,114 @@ describe("conversation management UI", () => {
 
     render(<App />);
 
-    expect(await screen.findByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Login" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Sign Up" })).toBeTruthy();
+    expect(await screen.findByRole("heading", {
+      name: "One Workspace. Infinite Possibilities."
+    })).toBeTruthy();
+    const mainNavigation = screen.getByRole("navigation", { name: "Main navigation" });
+    expect(within(mainNavigation).getByRole("button", { name: "Login" })).toBeTruthy();
+    expect(within(mainNavigation).getByRole("button", { name: "Sign Up" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Get Started" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Think, explore, and create." })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "AI Conversations" })).toBeTruthy();
+    expect(screen.getByRole("heading", { name: "Knowledge Chat" })).toBeTruthy();
     expect(api.refreshSession).not.toHaveBeenCalled();
+    expect(screen.queryByText("Workspace One")).toBeNull();
+  });
+
+  it("navigates from the landing page to Login and Sign Up", async () => {
+    window.history.replaceState(null, "", "/");
+    window.localStorage.removeItem("nexadesk.session.present");
+    render(<App />);
+    const user = userEvent.setup();
+
+    await user.click(within(screen.getByRole("navigation", {
+      name: "Main navigation"
+    })).getByRole("button", { name: "Login" }));
+    expect(window.location.pathname).toBe("/login");
+    expect(await screen.findByRole("heading", { name: "Welcome back" })).toBeTruthy();
+
+    window.history.replaceState(null, "", "/");
+    cleanup();
+    render(<App />);
+    await user.click(within(screen.getByRole("navigation", {
+      name: "Main navigation"
+    })).getByRole("button", { name: "Sign Up" }));
+    expect(window.location.pathname).toBe("/register");
+    expect(await screen.findByRole("heading", { name: "Create your account" })).toBeTruthy();
+  });
+
+  it("supports direct navigation to the signup alias", async () => {
+    window.history.replaceState(null, "", "/signup");
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Create your account" })).toBeTruthy();
+  });
+
+  it("shows loading immediately, ignores duplicate restore clicks, and accepts a valid session", async () => {
+    window.history.replaceState(null, "", "/");
+    window.localStorage.removeItem("nexadesk.session.present");
+    let resolveSession: ((result: AuthResult) => void) | undefined;
+    api.retryRefreshSession.mockImplementationOnce(() => new Promise(resolve => {
+      resolveSession = resolve;
+    }));
+    render(<App />);
+
+    const user = userEvent.setup();
+    const restoreButton = screen.getByRole("button", {
+      name: "Restore Existing Session"
+    });
+    await user.click(restoreButton);
+
+    const loadingButton = screen.getByRole("button", {
+      name: "Checking your session…"
+    });
+    expect((loadingButton as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(loadingButton);
+    expect(api.retryRefreshSession).toHaveBeenCalledTimes(1);
+
+    await act(async () => resolveSession?.(access));
+    expect(await screen.findByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
+    expect(screen.getAllByText("Workspace One").length).toBeGreaterThan(0);
+  });
+
+  it("shows the logged-out message after a 401 and provides a working Login action", async () => {
+    window.history.replaceState(null, "", "/");
+    window.localStorage.removeItem("nexadesk.session.present");
+    api.retryRefreshSession.mockRejectedValueOnce(
+      new api.ApiError("No active refresh session.", 401)
+    );
+    render(<App />);
+
+    await userEvent.setup().click(
+      screen.getByRole("button", { name: "Restore Existing Session" })
+    );
+
+    expect(await screen.findByText(
+      "No active session found. Please log in to continue."
+    )).toBeTruthy();
+    expect(window.localStorage.getItem("nexadesk.session.present")).toBeNull();
+    await userEvent.setup().click(screen.getByRole("button", { name: "Log in" }));
+    expect(window.location.pathname).toBe("/login");
+    expect(await screen.findByRole("heading", { name: "Welcome back" })).toBeTruthy();
+  });
+
+  it("does not apply a late restore result after navigating to Login", async () => {
+    window.history.replaceState(null, "", "/");
+    window.localStorage.removeItem("nexadesk.session.present");
+    let resolveSession: ((result: AuthResult) => void) | undefined;
+    api.retryRefreshSession.mockImplementationOnce(() => new Promise(resolve => {
+      resolveSession = resolve;
+    }));
+    render(<App />);
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Restore Existing Session" }));
+    await user.click(within(screen.getByRole("navigation", {
+      name: "Main navigation"
+    })).getByRole("button", { name: "Login" }));
+    await act(async () => resolveSession?.(access));
+
+    expect(await screen.findByRole("heading", { name: "Welcome back" })).toBeTruthy();
     expect(screen.queryByText("Workspace One")).toBeNull();
   });
 
@@ -829,7 +933,7 @@ describe("conversation management UI", () => {
     render(<App />);
 
     await userEvent.setup().click(
-      screen.getByRole("button", { name: "Restore existing session" })
+      screen.getByRole("button", { name: "Restore Existing Session" })
     );
 
     await waitFor(() => expect(api.retryRefreshSession).toHaveBeenCalledTimes(1));
@@ -845,9 +949,11 @@ describe("conversation management UI", () => {
     render(<App />);
 
     expect(await screen.findByRole("alert")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
+    expect(screen.getByRole("heading", {
+      name: "One Workspace. Infinite Possibilities."
+    })).toBeTruthy();
     await userEvent.setup().click(
-      screen.getByRole("button", { name: "Retry session restoration" })
+      screen.getByRole("button", { name: "Retry" })
     );
     expect(await screen.findByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
     expect(api.retryRefreshSession).toHaveBeenCalledTimes(1);
@@ -863,7 +969,9 @@ describe("conversation management UI", () => {
     await act(async () => vi.advanceTimersByTimeAsync(10_000));
 
     await act(async () => {});
-    expect(screen.getByRole("button", { name: "Login" })).toBeTruthy();
+    expect(within(screen.getByRole("navigation", {
+      name: "Main navigation"
+    })).getByRole("button", { name: "Login" })).toBeTruthy();
   });
 
   it("shows retry feedback for backend 5xx refresh failures", async () => {
@@ -874,7 +982,7 @@ describe("conversation management UI", () => {
     render(<App />);
 
     expect(await screen.findByRole("alert")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Retry session restoration" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
   });
 
   it("shows a retry state instead of loading forever when validation is slow", async () => {
@@ -884,15 +992,19 @@ describe("conversation management UI", () => {
     api.refreshSession.mockImplementation(() => new Promise(() => undefined));
     render(<App />);
 
-    expect(screen.getByText("Restoring your session…")).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Checking your session…" })).toBeTruthy();
+    expect(screen.getByRole("heading", {
+      name: "One Workspace. Infinite Possibilities."
+    })).toBeTruthy();
     await act(async () => {
       vi.advanceTimersByTime(10_000);
     });
 
-    expect(screen.getByText("Session restoration is taking longer than expected.")).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Retry session restoration" })).toBeTruthy();
-    expect(screen.getByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
+    expect(screen.getByText("Session check timed out. Please try again.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(screen.getByRole("heading", {
+      name: "One Workspace. Infinite Possibilities."
+    })).toBeTruthy();
   });
 
   it("does not render protected dashboard content before session validation succeeds", async () => {
@@ -904,9 +1016,11 @@ describe("conversation management UI", () => {
     }));
     render(<App />);
 
-    expect(screen.getByText("Restoring your session…")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Checking your session…" })).toBeTruthy();
     expect(screen.queryByText("Workspace One")).toBeNull();
-    expect(screen.getByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
+    expect(screen.getByRole("heading", {
+      name: "One Workspace. Infinite Possibilities."
+    })).toBeTruthy();
     await act(async () => resolveSession?.(access));
     expect(await screen.findByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
   });
@@ -924,7 +1038,7 @@ describe("conversation management UI", () => {
     render(<App />);
     await act(async () => vi.advanceTimersByTimeAsync(10_000));
 
-    fireEvent.click(screen.getByRole("button", { name: "Retry session restoration" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await act(async () => vi.runAllTimersAsync());
 
     await act(async () => resolveInitial?.({
@@ -976,7 +1090,7 @@ describe("conversation management UI", () => {
     render(<StrictMode><App /></StrictMode>);
 
     expect(api.refreshSession).toHaveBeenCalledTimes(2);
-    expect(screen.getByText("Restoring your session…")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Checking your session…" })).toBeTruthy();
     await act(async () => resolveSession?.(access));
     expect(await screen.findByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
   });
