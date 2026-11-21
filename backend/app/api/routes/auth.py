@@ -32,7 +32,10 @@ _REFRESH_COOKIE = "nexadesk_refresh"
 
 
 def _workspace_accesses(
-    db: Session, user: User, request_id: str | None = None
+    db: Session,
+    user: User,
+    request_id: str | None = None,
+    stage: str = "workspace_memberships_lookup_completed",
 ) -> list[WorkspaceAccess]:
     lookup_started_at = time.perf_counter()
     rows = db.execute(
@@ -49,7 +52,7 @@ def _workspace_accesses(
         for workspace, role in rows
     ]
     log_auth_stage(
-        "workspace_memberships_lookup_completed",
+        stage,
         lookup_started_at,
         request_id,
     )
@@ -108,7 +111,10 @@ def _validate_refresh_origin(request: Request) -> None:
     response_model=RegistrationResponse,
     status_code=status.HTTP_201_CREATED,
 )
-def register(body: RegisterRequest, db: DbSession) -> RegistrationResponse:
+def register(
+    body: RegisterRequest, request: Request, db: DbSession
+) -> RegistrationResponse:
+    request_id = getattr(request.state, "registration_request_id", None)
     try:
         user = register_user(
             db,
@@ -116,6 +122,7 @@ def register(body: RegisterRequest, db: DbSession) -> RegistrationResponse:
             body.password.get_secret_value(),
             body.workspace_name,
             body.full_name,
+            request_id=request_id,
         )
     except IntegrityError as exc:
         db.rollback()
@@ -129,7 +136,9 @@ def register(body: RegisterRequest, db: DbSession) -> RegistrationResponse:
             email=user.email,
             full_name=user.full_name,
         ),
-        workspaces=_workspace_accesses(db, user),
+        workspaces=_workspace_accesses(
+            db, user, request_id, "registration_workspace_memberships_lookup_completed"
+        ),
     )
 
 

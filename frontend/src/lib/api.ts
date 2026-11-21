@@ -94,6 +94,11 @@ export type LoginInstrumentation = {
   submittedAt: number;
 };
 
+export type RegistrationInstrumentation = {
+  requestId: string;
+  submittedAt: number;
+};
+
 type RequestTiming = {
   onRequestStarted?: (startedAt: number) => void;
   onResponseReceived?: (receivedAt: number) => void;
@@ -246,17 +251,77 @@ export function register(
   fullName: string,
   email: string,
   password: string,
-  workspaceName: string
+  workspaceName: string,
+  instrumentation?: RegistrationInstrumentation
 ): Promise<RegistrationResult> {
-  return request("/auth/register", {
-    method: "POST",
-    body: {
-      full_name: fullName,
-      email,
-      password,
-      workspace_name: workspaceName
+  let outcome = "success";
+  const requestIdDetails = instrumentation
+    ? { request_id: instrumentation.requestId }
+    : undefined;
+  let requestStartedAt: number | undefined;
+  let responseReceivedAt: number | undefined;
+  return (async () => {
+    try {
+      return await request("/auth/register", {
+        method: "POST",
+        body: {
+          full_name: fullName,
+          email,
+          password,
+          workspace_name: workspaceName
+        },
+        requestId: instrumentation?.requestId,
+        timing: instrumentation ? {
+          onRequestStarted: startedAt => {
+            requestStartedAt = startedAt;
+            recordFrontendPerformance(
+              "registration_request_started",
+              instrumentation.submittedAt,
+              requestIdDetails
+            );
+          },
+          onResponseReceived: receivedAt => {
+            responseReceivedAt = receivedAt;
+            recordFrontendPerformance(
+              "registration_response_headers_received",
+              requestStartedAt,
+              requestIdDetails
+            );
+          },
+          onResponseParsed: parsedAt => {
+            recordFrontendPerformance(
+              "registration_response_parsed",
+              requestStartedAt,
+              {
+                ...requestIdDetails,
+                response_body_parse_ms: responseReceivedAt === undefined
+                  ? 0
+                  : Math.round((parsedAt - responseReceivedAt) * 100) / 100
+              }
+            );
+          }
+        } : undefined
+      });
+    } catch (error) {
+      outcome = "failure";
+      if (instrumentation) {
+        recordFrontendPerformance(
+          "registration_request_failed",
+          requestStartedAt ?? instrumentation.submittedAt,
+          requestIdDetails
+        );
+      }
+      throw error;
+    } finally {
+      if (instrumentation) {
+        recordFrontendPerformance(
+          "registration_total_duration",
+          instrumentation.submittedAt,
+          { ...requestIdDetails, outcome }
+        );
+      }
     }
-  });
+  })();
 }
 
 export async function login(

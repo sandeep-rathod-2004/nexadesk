@@ -106,6 +106,7 @@ describe("conversation management UI", () => {
 
     it("creates an account and returns to Login without establishing a session", async () => {
       const user = userEvent.setup();
+      const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
       api.register.mockResolvedValue({
         user: { id: "user-1", email: "ada@example.com", full_name: "Ada Lovelace" },
         workspaces: access.workspaces
@@ -125,8 +126,24 @@ describe("conversation management UI", () => {
         "Ada Lovelace",
         "ada@example.com",
         "correct horse battery staple",
-        "My Workspace"
+        "My Workspace",
+        expect.objectContaining({
+          requestId: expect.stringMatching(
+            /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+          ),
+          submittedAt: expect.any(Number)
+        })
       );
+      const instrumentation = api.register.mock.calls[0][4] as {
+        requestId: string;
+      };
+      const events = consoleInfo.mock.calls.map(([message]) =>
+        JSON.parse(String(message)) as Record<string, unknown>
+      );
+      expect(events).toContainEqual(expect.objectContaining({
+        stage: "registration_submission_started",
+        request_id: instrumentation.requestId
+      }));
       expect(api.login).not.toHaveBeenCalled();
       expect(api.getModel).not.toHaveBeenCalled();
       expect(window.location.pathname).toBe("/login");

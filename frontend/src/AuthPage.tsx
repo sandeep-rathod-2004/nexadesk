@@ -1,7 +1,7 @@
 import { FormEvent, useState } from "react";
 import { Sparkles } from "lucide-react";
 import {
-  ApiError, AuthResult, LoginInstrumentation, login, register
+  ApiError, AuthResult, LoginInstrumentation, RegistrationInstrumentation, login, register
 } from "./lib/api";
 import { recordFrontendPerformance } from "./performance";
 
@@ -50,6 +50,7 @@ export default function AuthPage({
 
     setBusy(true);
     let loginInstrumentation: LoginInstrumentation | undefined;
+    let registrationInstrumentation: RegistrationInstrumentation | undefined;
     if (page === "login") {
       try {
         loginInstrumentation = {
@@ -58,6 +59,21 @@ export default function AuthPage({
         };
       } catch {
         loginInstrumentation = undefined;
+      }
+    }
+    if (page === "register") {
+      try {
+        registrationInstrumentation = {
+          requestId: crypto.randomUUID(),
+          submittedAt: performance.now()
+        };
+        recordFrontendPerformance(
+          "registration_submission_started",
+          registrationInstrumentation.submittedAt,
+          { request_id: registrationInstrumentation.requestId }
+        );
+      } catch {
+        registrationInstrumentation = undefined;
       }
     }
     if (loginInstrumentation) {
@@ -73,7 +89,8 @@ export default function AuthPage({
           fullName.trim(),
           email.trim(),
           password,
-          workspaceName.trim() || "My Workspace"
+          workspaceName.trim() || "My Workspace",
+          registrationInstrumentation
         );
         setPassword("");
         setConfirmPassword("");

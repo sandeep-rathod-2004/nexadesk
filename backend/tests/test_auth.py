@@ -6,7 +6,7 @@ import secrets
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import Response
 from sqlalchemy import create_engine, select
@@ -19,6 +19,7 @@ from app.core.config import Settings
 from app.core.security import create_access_token
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
+from app.services import auth as auth_service
 from app.services import performance as performance_service
 from app.services.auth import create_refresh_token, rotate_refresh_token
 
@@ -48,6 +49,97 @@ def test_registration_creates_hashed_password_and_owner_workspace(client):
     assert "password" not in payload
     assert "password_hash" not in payload
     assert "access_token" not in payload
+
+
+def test_registration_emits_correlated_timings_without_sensitive_data(
+    client, caplog, monkeypatch
+):
+    request_id = str(uuid4())
+    email = "private-registration@example.com"
+    password = "sensitive registration password"
+    password_hash = "synthetic-password-hash-secret"
+    monkeypatch.setattr(auth_service, "hash_password", lambda _password: password_hash)
+    with caplog.at_level(logging.INFO, logger="app.auth.performance"):
+        response = client.post(
+            "/api/v1/auth/register",
+            headers={
+                "X-Request-ID": request_id,
+                "Authorization": "Bearer synthetic-access-token",
+                "Cookie": "refresh=synthetic-refresh-cookie",
+            },
+            json={
+                "full_name": "Private Name",
+                "email": email,
+                "password": password,
+                "workspace_name": "Private Workspace",
+            },
+        )
+
+    assert response.status_code == 201
+    events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "app.auth.performance"
+    ]
+    assert [event["stage"] for event in events] == [
+        "registration_request_received",
+        "registration_password_hash_completed",
+        "registration_user_workspace_flush_completed",
+        "registration_membership_added_to_session",
+        "registration_transaction_committed",
+        "registration_user_refreshed",
+        "registration_workspace_memberships_lookup_completed",
+        "registration_request_completed",
+    ]
+    assert all(event["request_id"] == request_id for event in events)
+    assert all(
+        isinstance(event.get("duration_ms"), (int, float))
+        for event in events
+        if event["stage"] != "registration_request_received"
+    )
+    log_output = json.dumps(events)
+    assert email not in log_output
+    assert password not in log_output
+    assert password_hash not in log_output
+    assert "Private Name" not in log_output
+    assert "Private Workspace" not in log_output
+    assert "synthetic-access-token" not in log_output
+    assert "synthetic-refresh-cookie" not in log_output
+
+
+def test_registration_generates_request_id_for_invalid_header(client, caplog):
+    with caplog.at_level(logging.INFO, logger="app.auth.performance"):
+        response = client.post(
+            "/api/v1/auth/register",
+            headers={"X-Request-ID": "not-a-uuid"},
+            json={
+                "email": "generated-id@example.com",
+                "password": "correct horse battery staple",
+            },
+        )
+
+    assert response.status_code == 201
+    events = [
+        json.loads(record.message)
+        for record in caplog.records
+        if record.name == "app.auth.performance"
+        and "registration_" in record.message
+    ]
+    request_ids = {event["request_id"] for event in events}
+    assert len(request_ids) == 1
+    assert UUID(next(iter(request_ids)))
+    assert "not-a-uuid" not in json.dumps(events)
+
+
+def test_registration_succeeds_when_performance_logger_raises(client, monkeypatch):
+    def fail_logging(*_args, **_kwargs):
+        raise OSError("telemetry sink unavailable")
+
+    monkeypatch.setattr(performance_service._auth_logger, "info", fail_logging)
+    response = register(client, email="telemetry@example.com")
+
+    assert response.status_code == 201
+    assert response.json()["user"]["email"] == "telemetry@example.com"
 
 
 def test_duplicate_registration_and_login(client):

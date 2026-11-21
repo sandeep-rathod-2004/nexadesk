@@ -114,13 +114,23 @@ async def log_request_start(request, call_next):
     request.state.request_received_at = time.perf_counter()
     request_id = request_id_for_log(request.headers.get("x-request-id"))
     login_path = f"{settings.api_v1_prefix.rstrip('/')}/auth/login"
+    register_path = f"{settings.api_v1_prefix.rstrip('/')}/auth/register"
     is_login_request = request.url.path == login_path
+    is_registration_request = (
+        request.method == "POST" and request.url.path == register_path
+    )
     login_started_at = None
+    registration_started_at = None
     if is_login_request:
         request_id = request_id or str(uuid4())
         request.state.auth_request_id = request_id
         login_started_at = time.perf_counter()
         log_auth_stage("request_received", request_id=request_id)
+    if is_registration_request:
+        request_id = request_id or str(uuid4())
+        request.state.registration_request_id = request_id
+        registration_started_at = time.perf_counter()
+        log_auth_stage("registration_request_received", request_id=request_id)
     if request.url.path.endswith("/chat/stream"):
         logging.getLogger("app.chat.performance").info(
             json.dumps(
@@ -139,6 +149,12 @@ async def log_request_start(request, call_next):
             log_auth_stage(
                 "login_request_completed",
                 login_started_at,
+                request_id,
+            )
+        if is_registration_request and registration_started_at is not None:
+            log_auth_stage(
+                "registration_request_completed",
+                registration_started_at,
                 request_id,
             )
 

@@ -29,15 +29,30 @@ def register_user(
     password: str,
     workspace_name: str,
     full_name: str | None = None,
+    request_id: str | None = None,
 ) -> User:
+    password_hash_started_at = time.perf_counter()
+    password_hash = hash_password(password)
+    log_auth_stage(
+        "registration_password_hash_completed",
+        password_hash_started_at,
+        request_id,
+    )
     user = User(
         full_name=full_name,
         email=email.strip().lower(),
-        password_hash=hash_password(password),
+        password_hash=password_hash,
     )
     workspace = Workspace(name=workspace_name)
+    flush_started_at = time.perf_counter()
     db.add_all([user, workspace])
     db.flush()
+    log_auth_stage(
+        "registration_user_workspace_flush_completed",
+        flush_started_at,
+        request_id,
+    )
+    membership_started_at = time.perf_counter()
     db.add(
         WorkspaceMembership(
             user_id=user.id,
@@ -45,8 +60,25 @@ def register_user(
             role="owner",
         )
     )
+    log_auth_stage(
+        "registration_membership_added_to_session",
+        membership_started_at,
+        request_id,
+    )
+    commit_started_at = time.perf_counter()
     db.commit()
+    log_auth_stage(
+        "registration_transaction_committed",
+        commit_started_at,
+        request_id,
+    )
+    refresh_started_at = time.perf_counter()
     db.refresh(user)
+    log_auth_stage(
+        "registration_user_refreshed",
+        refresh_started_at,
+        request_id,
+    )
     return user
 
 

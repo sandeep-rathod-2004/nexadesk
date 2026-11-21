@@ -13,6 +13,7 @@ import {
   renameConversation,
   refreshSession,
   retryRefreshSession,
+  register,
   setAccessToken,
   streamChat,
   uploadKnowledgeDocument
@@ -33,6 +34,92 @@ afterEach(() => {
 });
 
 describe("conversation API client", () => {
+  it("correlates and times registration without recording sensitive data", async () => {
+    const requestId = "00000000-0000-4000-8000-000000000003";
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      user: { id: "user-1", email: "private@example.com" },
+      workspaces: []
+    }), { status: 201 }));
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await register(
+      "Private Name",
+      "private@example.com",
+      "sensitive-password",
+      "Private Workspace",
+      { requestId, submittedAt: performance.now() }
+    );
+
+    expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).get("x-request-id"))
+      .toBe(requestId);
+    const events = consoleInfo.mock.calls.map(([message]) =>
+      JSON.parse(String(message)) as Record<string, unknown>
+    );
+    expect(events.map(event => event.stage)).toEqual([
+      "registration_request_started",
+      "registration_response_headers_received",
+      "registration_response_parsed",
+      "registration_total_duration"
+    ]);
+    expect(events.every(event => event.request_id === requestId)).toBe(true);
+    expect(JSON.stringify(events)).not.toContain("private@example.com");
+    expect(JSON.stringify(events)).not.toContain("sensitive-password");
+    expect(JSON.stringify(events)).not.toContain("Private Name");
+    expect(JSON.stringify(events)).not.toContain("Private Workspace");
+  });
+
+  it("records registration failure and total duration", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError("Network unavailable"));
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const requestId = "00000000-0000-4000-8000-000000000004";
+    await expect(register(
+      "Ada Lovelace",
+      "ada@example.com",
+      "sensitive-password",
+      "Workspace",
+      {
+        requestId,
+        submittedAt: performance.now()
+      }
+    )).rejects.toThrow("Network unavailable");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const events = consoleInfo.mock.calls.map(([message]) =>
+      JSON.parse(String(message)) as Record<string, unknown>
+    );
+    expect(events.map(event => event.stage)).toEqual([
+      "registration_request_started",
+      "registration_request_failed",
+      "registration_total_duration"
+    ]);
+    expect(events.every(event => event.request_id === requestId)).toBe(true);
+    expect(events[2]).toMatchObject({ outcome: "failure" });
+  });
+
+  it("completes registration when performance logging throws", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      user: { id: "user-1", email: "private@example.com" },
+      workspaces: []
+    }), { status: 201 }));
+    vi.spyOn(console, "info").mockImplementation(() => {
+      throw new Error("console unavailable");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(register(
+      "Ada Lovelace",
+      "ada@example.com",
+      "sensitive-password",
+      "Workspace",
+      {
+        requestId: "00000000-0000-4000-8000-000000000005",
+        submittedAt: performance.now()
+      }
+    )).resolves.toMatchObject({ user: { id: "user-1" } });
+  });
+
   it("times and correlates login without logging credentials or tokens", async () => {
     const requestId = "00000000-0000-4000-8000-000000000001";
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
