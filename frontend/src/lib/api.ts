@@ -1,3 +1,5 @@
+import { recordFrontendPerformance } from "../performance";
+
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000/api/v1";
 
 export type WorkspaceAccess = { id: string; name: string; role: string };
@@ -94,6 +96,8 @@ export function setAccessToken(token: string | null): void {
 export function refreshSession(): Promise<AuthResult> {
   if (refreshInFlight) return refreshInFlight;
 
+  const refreshStartedAt = performance.now();
+  recordFrontendPerformance("refresh_request_started");
   refreshAbortController = new AbortController();
   const controller = refreshAbortController;
   const timeoutId = window.setTimeout(() => controller.abort(), REFRESH_REQUEST_TIMEOUT_MS);
@@ -104,7 +108,12 @@ export function refreshSession(): Promise<AuthResult> {
   })
     .then(result => {
       setAccessToken(result.access_token);
+      recordFrontendPerformance("refresh_request_completed", refreshStartedAt);
       return result;
+    })
+    .catch(error => {
+      recordFrontendPerformance("refresh_request_failed", refreshStartedAt);
+      throw error;
     })
     .finally(() => {
       window.clearTimeout(timeoutId);

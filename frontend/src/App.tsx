@@ -15,6 +15,7 @@ import {
 } from "./lib/api";
 import AuthPage, { AuthPageRoute } from "./AuthPage";
 import KnowledgeBase from "./KnowledgeBase";
+import { recordFrontendPerformance } from "./performance";
 
 const MarkdownMessage = lazy(() => import("./MarkdownMessage"));
 
@@ -28,7 +29,8 @@ type Message = {
 };
 const initial: Message[] = [];
 const SESSION_RESTORE_TIMEOUT_MS = 10_000;
-type RestorationStatus = "restoring" | "authenticated" | "unauthenticated" | "network_error" | "timed_out";
+const SESSION_HINT_KEY = "nexadesk.session.present";
+type RestorationStatus = "public" | "restoring" | "authenticated" | "unauthenticated" | "network_error" | "timed_out";
 
 function authPageFromPath(pathname: string): AuthPageRoute {
   if (pathname === "/register") return "register";
@@ -72,11 +74,18 @@ export default function App() {
   const [activeView, setActiveView] = useState<"conversations" | "knowledge">("conversations");
   const [auth, setAuth] = useState<AuthResult | null>(null);
   const [restorationStatus, setRestorationStatus] =
-    useState<RestorationStatus>("restoring");
+    useState<RestorationStatus>(() =>
+      window.location.pathname === "/" && !window.localStorage.getItem(SESSION_HINT_KEY)
+        ? "public"
+        : "restoring"
+    );
   const [restoreAttempt, setRestoreAttempt] = useState(0);
   const [modelInfo, setModelInfo] = useState<ModelInfo | null>(null);
   const [modelInfoUnavailable, setModelInfoUnavailable] = useState(false);
   const [authPage, setAuthPage] = useState<AuthPageRoute>(() => authPageFromPath(window.location.pathname));
+  const [authPageVisible, setAuthPageVisible] = useState(
+    () => window.location.pathname !== "/"
+  );
   const [workspaceId, setWorkspaceId] = useState("");
   const [authError, setAuthError] = useState("");
   const [chatError, setChatError] = useState("");
@@ -106,6 +115,7 @@ export default function App() {
   const saveDocumentsInFlight = useRef(false);
   const sidebarRef = useRef<HTMLElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const dashboardInteractiveRecorded = useRef(false);
   const activeChatRequest = useRef<AbortController | null>(null);
   const activeRequestId = useRef<string | null>(null);
   const stopRequested = useRef(false);
@@ -134,7 +144,17 @@ export default function App() {
   }, [welcomeVisible, messagesLoading, conversationId]);
 
   useEffect(() => {
-    const handlePopState = () => setAuthPage(authPageFromPath(window.location.pathname));
+    const frame = window.requestAnimationFrame(() => {
+      recordFrontendPerformance("public_shell_rendered");
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setAuthPage(authPageFromPath(window.location.pathname));
+      setAuthPageVisible(window.location.pathname !== "/");
+    };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
@@ -158,6 +178,15 @@ export default function App() {
 
   useEffect(() => {
     let active = true;
+
+    if (restoreAttempt === 0 &&
+        !window.localStorage.getItem(SESSION_HINT_KEY) &&
+        window.location.pathname === "/") {
+      setRestorationStatus("public");
+      return;
+    }
+
+    const restorationStartedAt = performance.now();
     const generation = ++restorationGeneration.current;
     setRestorationStatus("restoring");
     const timeoutId = window.setTimeout(() => {
@@ -170,7 +199,9 @@ export default function App() {
         if (!active || restorationGeneration.current !== generation) return;
         setAccessToken(result.access_token);
         setAuth(result);
+        window.localStorage.setItem(SESSION_HINT_KEY, "1");
         setRestorationStatus("authenticated");
+        recordFrontendPerformance("authentication_restoration_completed", restorationStartedAt);
         const key = `nexadesk.workspace.${result.user.id}`;
         const savedWorkspace = window.sessionStorage.getItem(key);
         const selectedWorkspace = result.workspaces.find(
@@ -191,11 +222,14 @@ export default function App() {
         if (!active || restorationGeneration.current !== generation) return;
         setAccessToken(null);
         setAuth(null);
+        recordFrontendPerformance("authentication_restoration_completed", restorationStartedAt);
         setRestorationStatus(current => {
+          if (error instanceof ApiError && error.status === 401) {
+            window.localStorage.removeItem(SESSION_HINT_KEY);
+            return "public";
+          }
           if (current === "timed_out") return "timed_out";
-          return error instanceof ApiError && error.status === 401
-            ? "unauthenticated"
-            : "network_error";
+          return "network_error";
         });
       })
       .finally(() => {
@@ -208,17 +242,30 @@ export default function App() {
   }, [restoreAttempt]);
 
   useEffect(() => {
+    if (!auth || restorationStatus !== "authenticated" || dashboardInteractiveRecorded.current) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (dashboardInteractiveRecorded.current) return;
+      dashboardInteractiveRecorded.current = true;
+      recordFrontendPerformance("dashboard_interactive");
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [auth, restorationStatus]);
+
+  useEffect(() => {
     if (!auth) {
       setModelInfo(null);
       setModelInfoUnavailable(false);
       return;
     }
     let active = true;
+    const loadingStartedAt = performance.now();
+    recordFrontendPerformance("model_loading_started");
     setModelInfo(null);
     setModelInfoUnavailable(false);
     void getModel(auth.access_token)
       .then(info => {
         if (!active) return;
+        recordFrontendPerformance("model_loading_completed", loadingStartedAt);
         if (
           typeof info.provider !== "string" || !info.provider.trim() ||
           typeof info.model !== "string" || !info.model.trim()
@@ -229,6 +276,8 @@ export default function App() {
         setModelInfo(info);
       })
       .catch(error => {
+        if (!active) return;
+        recordFrontendPerformance("model_loading_failed", loadingStartedAt);
         if (error instanceof ApiError && error.status === 401) {
           if (active) expireSession(error);
           return;
@@ -289,15 +338,21 @@ export default function App() {
       return;
     }
     let active = true;
+    const loadingStartedAt = performance.now();
+    recordFrontendPerformance("documents_loading_started");
     setKnowledgeDocuments([]);
     setKnowledgeLoading(true);
     setKnowledgeError("");
     void listKnowledgeDocuments(auth.access_token, workspaceId)
       .then(documents => {
-        if (active) setKnowledgeDocuments(documents);
+        if (active) {
+          recordFrontendPerformance("documents_loading_completed", loadingStartedAt);
+          setKnowledgeDocuments(documents);
+        }
       })
       .catch(error => {
         if (!active) return;
+        recordFrontendPerformance("documents_loading_failed", loadingStartedAt);
         if (error instanceof ApiError && error.status === 401) {
           expireSession(error);
           return;
@@ -318,9 +373,11 @@ export default function App() {
     conversationListRequest.current += 1;
     setAccessToken(null);
     setAuth(null);
-    setRestorationStatus("unauthenticated");
+    window.localStorage.removeItem(SESSION_HINT_KEY);
+    setRestorationStatus("public");
     window.history.replaceState(null, "", "/login");
     setAuthPage("login");
+    setAuthPageVisible(true);
     setActiveView("conversations");
     setWorkspaceId("");
     setConversations([]);
@@ -336,6 +393,7 @@ export default function App() {
   function navigateAuthPage(page: AuthPageRoute) {
     window.history.pushState(null, "", authPath(page));
     setAuthPage(page);
+    setAuthPageVisible(true);
     setAuthError("");
   }
 
@@ -343,6 +401,7 @@ export default function App() {
     setWelcomeVisible(true);
     setAccessToken(result.access_token);
     setAuth(result);
+    window.localStorage.setItem(SESSION_HINT_KEY, "1");
     setRestorationStatus("authenticated");
     const key = `nexadesk.workspace.${result.user.id}`;
     const savedWorkspace = window.sessionStorage.getItem(key);
@@ -355,6 +414,7 @@ export default function App() {
         ? "knowledge"
         : "conversations"
     );
+    setAuthPageVisible(false);
     window.history.replaceState(null, "", "/");
   }
 
@@ -400,6 +460,7 @@ export default function App() {
 
   function retrySessionRestore() {
     setAuth(null);
+    setAuthPageVisible(false);
     setRestorationStatus("restoring");
     setRestoreAttempt(attempt => attempt + 1);
   }
@@ -411,9 +472,11 @@ export default function App() {
     setAccessToken(null);
     conversationListRequest.current += 1;
     setAuth(null);
-    setRestorationStatus("unauthenticated");
+    window.localStorage.removeItem(SESSION_HINT_KEY);
+    setRestorationStatus("public");
     window.history.replaceState(null, "", "/login");
     setAuthPage("login");
+    setAuthPageVisible(true);
     setWorkspaceId("");
     setConversations([]);
     setConversationsLoading(false);
@@ -428,12 +491,15 @@ export default function App() {
       return;
     }
     let active = true;
+    const loadingStartedAt = performance.now();
+    recordFrontendPerformance("conversations_loading_started");
     const requestId = ++conversationListRequest.current;
     setConversationsLoading(true);
     setConversationError("");
     void listConversations(auth.access_token, workspaceId)
       .then(items => {
         if (active && requestId === conversationListRequest.current) {
+          recordFrontendPerformance("conversations_loading_completed", loadingStartedAt);
           setConversations(items);
           const savedId = window.sessionStorage.getItem(
             conversationStorageKey(auth.user.id, workspaceId)
@@ -450,6 +516,7 @@ export default function App() {
       })
       .catch(error => {
         if (!active || requestId !== conversationListRequest.current) return;
+        recordFrontendPerformance("conversations_loading_failed", loadingStartedAt);
         if (error instanceof ApiError && error.status === 401) {
           expireSession(error);
         } else {
@@ -997,42 +1064,51 @@ export default function App() {
       ? "Messages are processed by your configured local Ollama runtime."
       : "AI provider information is currently unavailable.";
 
-  if (restorationStatus === "network_error" || restorationStatus === "timed_out") {
+  if (!auth) {
+    if (authPageVisible) {
+      return <AuthPage
+        page={authPage}
+        onNavigate={navigateAuthPage}
+        onAuthenticated={acceptLogin}
+        authMessage={authError}
+        onBackToLanding={() => {
+          setAuthPageVisible(false);
+          window.history.replaceState(null, "", "/");
+        }}
+      />;
+    }
+
     return <div className="app-shell">
-      <main className="main-panel">
-        <header className="topbar"><div className="topbar-left"><div className="topbar-brand"><span className="brand-mark"><Sparkles size={17}/></span><span className="brand-name">nexa<span>desk</span></span></div></div></header>
-        <section className="public-restore-shell" role="alert">
+      <main className="main-panel public-main-panel">
+        <header className="topbar public-topbar">
+          <div className="topbar-left">
+            <div className="topbar-brand"><span className="brand-mark"><Sparkles size={17}/></span><span className="brand-name">nexa<span>desk</span></span></div>
+          </div>
+          <div className="public-topbar-actions">
+            <button type="button" className="public-login-button" onClick={() => {
+              setAuthPage("login");
+              setAuthPageVisible(true);
+              window.history.pushState(null, "", "/login");
+            }}>Login</button>
+            <button type="button" className="public-signup-button" onClick={() => {
+              setAuthPage("register");
+              setAuthPageVisible(true);
+              window.history.pushState(null, "", "/register");
+            }}>Sign Up</button>
+          </div>
+        </header>
+        <section className="public-landing" role="region" aria-label="NexaDesk public welcome">
           <span className="empty-state-icon"><Sparkles size={25}/></span>
           <h1>Welcome to NexaDesk</h1>
-          <p>{restorationStatus === "timed_out"
-            ? "Session restoration is taking longer than expected."
-            : "We couldn't restore your session. Check your connection and try again."}</p>
-          <button type="button" className="auth-submit" onClick={retrySessionRestore}>Retry session restoration</button>
+          <p className="public-landing-subtitle">Your AI workspace for conversations, documents, and knowledge.</p>
+          {restorationStatus === "network_error" && <p className="public-state-message" role="alert">We couldn't restore your session. Check your connection and try again.</p>}
+          {restorationStatus === "timed_out" && <p className="public-state-message" role="alert">Session restoration is taking longer than expected.</p>}
+          {restorationStatus === "public" && <button type="button" className="public-restore-button" onClick={retrySessionRestore}>Restore existing session</button>}
+          {(restorationStatus === "network_error" || restorationStatus === "timed_out") && <button type="button" className="auth-submit" onClick={retrySessionRestore}>Retry session restoration</button>}
+          {restorationStatus === "restoring" && <p className="public-state-message" role="status" aria-live="polite">Restoring your session…</p>}
         </section>
       </main>
     </div>;
-  }
-
-  if (restorationStatus === "restoring") {
-    return <div className="app-shell">
-      <main className="main-panel">
-        <header className="topbar"><div className="topbar-left"><div className="topbar-brand"><span className="brand-mark"><Sparkles size={17}/></span><span className="brand-name">nexa<span>desk</span></span></div></div></header>
-        <section className="public-restore-shell" role="status" aria-live="polite">
-          <span className="empty-state-icon"><Sparkles size={25}/></span>
-          <h1>Welcome to NexaDesk</h1>
-          <p>Restoring your session…</p>
-        </section>
-      </main>
-    </div>;
-  }
-
-  if (restorationStatus === "unauthenticated" || !auth) {
-    return <AuthPage
-      page={authPage}
-      onNavigate={navigateAuthPage}
-      onAuthenticated={acceptLogin}
-      authMessage={authError}
-    />;
   }
 
   return <div className="app-shell">

@@ -9,6 +9,7 @@ type Props = {
   onNavigate: (page: AuthPageRoute) => void;
   onAuthenticated: (result: AuthResult) => void;
   authMessage?: string;
+  onBackToLanding?: () => void;
 };
 
 const pageTitles: Record<AuthPageRoute, string> = {
@@ -22,7 +23,8 @@ export default function AuthPage({
   page,
   onNavigate,
   onAuthenticated,
-  authMessage = ""
+  authMessage = "",
+  onBackToLanding
 }: Props) {
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
@@ -107,6 +109,7 @@ export default function AuthPage({
         <label>Email<input type="email" autoComplete="email" required value={email} onChange={event => setEmail(event.target.value)} /></label>
         <label>Password<input type="password" autoComplete={page === "register" ? "new-password" : "current-password"} minLength={page === "register" ? 12 : 1} maxLength={128} required value={password} onChange={event => setPassword(event.target.value)} /></label>
         {page === "register" && <label>Confirm password<input type="password" autoComplete="new-password" minLength={12} maxLength={128} required value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)} /></label>}
+        {onBackToLanding && <button className="auth-toggle" type="button" onClick={onBackToLanding}>Back to NexaDesk</button>}
         {notice && <p className="auth-success" role="status">{notice}</p>}
         {(error || authMessage) && <p className="auth-error" role="alert">{error || authMessage}</p>}
         <button className="auth-submit" type="submit" disabled={busy}>

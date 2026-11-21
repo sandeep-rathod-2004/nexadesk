@@ -79,6 +79,7 @@ describe("conversation management UI", () => {
     window.history.replaceState(null, "", "/login");
     window.sessionStorage.clear();
     window.localStorage.clear();
+    window.localStorage.setItem("nexadesk.session.present", "1");
     api.refreshSession.mockRejectedValue(new api.ApiError("No session", 401));
     api.retryRefreshSession.mockRejectedValue(new api.ApiError("No session", 401));
     api.logout.mockResolvedValue(undefined);
@@ -451,7 +452,71 @@ describe("conversation management UI", () => {
       "in-memory-token",
       "conversation-1"
     ));
-    expect(await screen.findByText("No conversations yet. Start a new one.")).toBeTruthy();
+  });
+
+  it("keeps restored conversations clickable without overlapping the sidebar bottom panel", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 });
+    api.listConversations.mockResolvedValue([firstConversation]);
+    api.getMessages.mockResolvedValue([{
+      id: "message-1",
+      role: "user",
+      content: "Restored conversation message",
+      created_at: "2026-01-01T00:00:00Z",
+      status: "completed"
+    }]);
+
+    const user = await signIn();
+    const sidebar = screen.getByRole("complementary", { hidden: true });
+    const history = within(sidebar).getByLabelText("Conversation history");
+    const conversation = await within(history).findByRole("button", {
+      name: /^Planning notes$/
+    });
+
+    expect(history.classList.contains("recent-list")).toBe(true);
+    const sidebarBottom = sidebar.querySelector(".sidebar-bottom");
+    expect(sidebarBottom).toBeTruthy();
+    if (!sidebarBottom) throw new Error("Sidebar bottom panel was not rendered.");
+    expect(
+      history.compareDocumentPosition(sidebarBottom) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+
+    await user.click(conversation);
+    await waitFor(() => expect(api.getMessages).toHaveBeenCalledWith(
+      "in-memory-token",
+      "conversation-1"
+    ));
+    expect(await screen.findByText("Restored conversation message")).toBeTruthy();
+  });
+
+  it("allows a long conversation history to scroll independently while preserving navigation", async () => {
+    const longHistory = Array.from({ length: 30 }, (_, index) => ({
+      ...firstConversation,
+      id: `conversation-${index + 1}`,
+      title: `Planning notes ${index + 1}`
+    }));
+    api.listConversations.mockResolvedValue(longHistory);
+
+    const user = await signIn();
+    const sidebar = screen.getByRole("complementary", { hidden: true });
+    const history = within(sidebar).getByLabelText("Conversation history");
+
+    await user.click(await within(history).findByRole("button", {
+      name: "Show 28 more"
+    }));
+    expect(await within(history).findByRole("button", {
+      name: /^Planning notes 30$/
+    })).toBeTruthy();
+    expect(sidebar.querySelector(".sidebar-bottom")).toBeTruthy();
+    expect(screen.getByRole("progressbar", {
+      name: "Getting started progress"
+    })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /New conversation/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /New Knowledge Chat/ })).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: /New Knowledge Chat/ }));
+    expect(await screen.findByRole("dialog", {
+      name: "Create a Knowledge Chat"
+    })).toBeTruthy();
   });
 
   it("creates a Knowledge Chat with only the selected ready documents", async () => {
@@ -743,7 +808,38 @@ describe("conversation management UI", () => {
     ));
   });
 
+  it("renders a public landing immediately and does not refresh for a first-time visitor", async () => {
+    window.history.replaceState(null, "", "/");
+    window.localStorage.removeItem("nexadesk.session.present");
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { name: "Welcome to NexaDesk" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Login" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Sign Up" })).toBeTruthy();
+    expect(api.refreshSession).not.toHaveBeenCalled();
+    expect(screen.queryByText("Workspace One")).toBeNull();
+  });
+
+  it("provides a server-validation path when the session hint is missing", async () => {
+    window.history.replaceState(null, "", "/");
+    window.localStorage.removeItem("nexadesk.session.present");
+    api.retryRefreshSession.mockResolvedValueOnce(access);
+
+    render(<App />);
+
+    await userEvent.setup().click(
+      screen.getByRole("button", { name: "Restore existing session" })
+    );
+
+    await waitFor(() => expect(api.retryRefreshSession).toHaveBeenCalledTimes(1));
+    await screen.findByRole("heading", { name: "Welcome to NexaDesk" });
+    expect(window.localStorage.getItem("nexadesk.session.present")).toBe("1");
+  });
+
   it("shows a bounded session restoration error and retries server validation", async () => {
+    window.history.replaceState(null, "", "/");
+    window.localStorage.setItem("nexadesk.session.present", "1");
     api.refreshSession.mockRejectedValueOnce(new Error("Network unavailable"));
     api.retryRefreshSession.mockResolvedValueOnce(access);
     render(<App />);
@@ -757,7 +853,33 @@ describe("conversation management UI", () => {
     expect(api.retryRefreshSession).toHaveBeenCalledTimes(1);
   });
 
+  it("401 overrides a previous timeout and returns to public Login experience", async () => {
+    vi.useFakeTimers();
+    window.history.replaceState(null, "", "/");
+    window.localStorage.setItem("nexadesk.session.present", "1");
+    api.refreshSession.mockRejectedValueOnce(new api.ApiError("Session refresh is invalid.", 401));
+
+    render(<App />);
+    await act(async () => vi.advanceTimersByTimeAsync(10_000));
+
+    await act(async () => {});
+    expect(screen.getByRole("button", { name: "Login" })).toBeTruthy();
+  });
+
+  it("shows retry feedback for backend 5xx refresh failures", async () => {
+    window.history.replaceState(null, "", "/");
+    window.localStorage.setItem("nexadesk.session.present", "1");
+    api.refreshSession.mockRejectedValueOnce(new api.ApiError("Request failed (503)", 503));
+
+    render(<App />);
+
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry session restoration" })).toBeTruthy();
+  });
+
   it("shows a retry state instead of loading forever when validation is slow", async () => {
+    window.history.replaceState(null, "", "/");
+    window.localStorage.setItem("nexadesk.session.present", "1");
     vi.useFakeTimers();
     api.refreshSession.mockImplementation(() => new Promise(() => undefined));
     render(<App />);
@@ -774,6 +896,8 @@ describe("conversation management UI", () => {
   });
 
   it("does not render protected dashboard content before session validation succeeds", async () => {
+    window.history.replaceState(null, "", "/");
+    window.localStorage.setItem("nexadesk.session.present", "1");
     let resolveSession: ((result: AuthResult) => void) | undefined;
     api.refreshSession.mockImplementation(() => new Promise(resolve => {
       resolveSession = resolve;
@@ -788,6 +912,8 @@ describe("conversation management UI", () => {
   });
 
   it("ignores stale refresh responses after a newer restoration attempt", async () => {
+    window.history.replaceState(null, "", "/");
+    window.localStorage.setItem("nexadesk.session.present", "1");
     vi.useFakeTimers();
     let resolveInitial: ((result: AuthResult) => void) | undefined;
     api.refreshSession.mockImplementationOnce(() => new Promise(resolve => {
@@ -809,7 +935,40 @@ describe("conversation management UI", () => {
     expect(screen.queryByText("stale@example.com")).toBeNull();
   });
 
+  it("records public shell, authentication and independent loading stages", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    api.refreshSession.mockResolvedValue(access);
+
+    render(<App />);
+
+    await screen.findByRole("heading", { name: "Welcome to NexaDesk" });
+    await waitFor(() => {
+      expect(api.getModel).toHaveBeenCalled();
+      expect(api.listConversations).toHaveBeenCalled();
+      expect(api.listKnowledgeDocuments).toHaveBeenCalled();
+    });
+
+    const stages = info.mock.calls
+      .map(([value]) => {
+        try {
+          const event = JSON.parse(String(value)) as { event?: string; stage?: string };
+          return event.event === "nexadesk_frontend_performance" ? event.stage : undefined;
+        } catch {
+          return undefined;
+        }
+      })
+      .filter((stage): stage is string => Boolean(stage));
+
+    expect(stages).toContain("authentication_restoration_completed");
+    expect(stages).toContain("dashboard_interactive");
+    expect(stages).toContain("model_loading_started");
+    expect(stages).toContain("conversations_loading_started");
+    expect(stages).toContain("documents_loading_started");
+  });
+
   it("completes session restoration safely through StrictMode effect replay", async () => {
+    window.history.replaceState(null, "", "/");
+    window.localStorage.setItem("nexadesk.session.present", "1");
     let resolveSession: ((result: AuthResult) => void) | undefined;
     api.refreshSession.mockImplementation(() => new Promise(resolve => {
       resolveSession = resolve;
